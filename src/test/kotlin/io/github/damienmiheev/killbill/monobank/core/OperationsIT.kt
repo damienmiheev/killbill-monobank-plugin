@@ -370,4 +370,97 @@ class OperationsIT : ServiceHarness() {
         reconcile.runOnce()
         assertThat(health.getHealthStatus(null, null).isHealthy).isTrue()
     }
+
+    @Test
+    fun `monobank's whole-second status time does not lose to the fractional time of an earlier answer`() {
+        // Seen live: a saved-card hold answered `processing` with modifiedDate 19:04:33.525289; invoice/status then
+        // said `hold` with modifiedDate 19:04:33 (whole seconds). The newer answer must win.
+        val claimed =
+            (
+                transactions.claim(
+                    io.github.damienmiheev.killbill.monobank.db.NewTx(
+                        tenantId = tenantId,
+                        accountId = UUID.randomUUID(),
+                        paymentId = UUID.randomUUID(),
+                        paymentMethodId = null,
+                        invoiceKbId = null,
+                        transactionId = UUID.randomUUID(),
+                        type = TransactionType.AUTHORIZE,
+                        callerRef = null,
+                        invoiceId = null,
+                        amountMinor = 100,
+                        currency = "UAH",
+                        saveCard = false,
+                    ),
+                ) as io.github.damienmiheev.killbill.monobank.db.Claim.Claimed
+            ).row
+        val second = Instant.parse("2026-11-12T19:04:33Z")
+        transactions.transition(
+            claimed.recordId,
+            TxState.OPEN,
+            io.github.damienmiheev.killbill.monobank.db.TxChange(
+                TxState.PENDING,
+                invoiceId = "inv-precision",
+                monoStatus = "processing",
+                monoModifiedAt = second.plusNanos(525_289_000),
+            ),
+        )
+        val held =
+            transactions.transition(
+                claimed.recordId,
+                TxState.OPEN,
+                io.github.damienmiheev.killbill.monobank.db.TxChange(
+                    TxState.SUCCESS,
+                    monoStatus = "hold",
+                    monoModifiedAt = second,
+                ),
+            )
+        assertThat(held.state).isEqualTo(TxState.SUCCESS)
+        assertThat(held.monoStatus).isEqualTo("hold")
+    }
+
+    @Test
+    fun `an answer from an earlier second still loses to a newer one`() {
+        val claimed =
+            (
+                transactions.claim(
+                    io.github.damienmiheev.killbill.monobank.db.NewTx(
+                        tenantId = tenantId,
+                        accountId = UUID.randomUUID(),
+                        paymentId = UUID.randomUUID(),
+                        paymentMethodId = null,
+                        invoiceKbId = null,
+                        transactionId = UUID.randomUUID(),
+                        type = TransactionType.AUTHORIZE,
+                        callerRef = null,
+                        invoiceId = null,
+                        amountMinor = 100,
+                        currency = "UAH",
+                        saveCard = false,
+                    ),
+                ) as io.github.damienmiheev.killbill.monobank.db.Claim.Claimed
+            ).row
+        val second = Instant.parse("2026-11-12T19:04:33Z")
+        transactions.transition(
+            claimed.recordId,
+            TxState.OPEN,
+            io.github.damienmiheev.killbill.monobank.db.TxChange(
+                TxState.PENDING,
+                invoiceId = "inv-older",
+                monoStatus = "processing",
+                monoModifiedAt = second.plusNanos(525_289_000),
+            ),
+        )
+        val stale =
+            transactions.transition(
+                claimed.recordId,
+                TxState.OPEN,
+                io.github.damienmiheev.killbill.monobank.db.TxChange(
+                    TxState.PENDING,
+                    monoStatus = "created",
+                    monoModifiedAt = second.minusMillis(1),
+                ),
+            )
+        assertThat(stale.monoStatus).isEqualTo("processing")
+    }
 }

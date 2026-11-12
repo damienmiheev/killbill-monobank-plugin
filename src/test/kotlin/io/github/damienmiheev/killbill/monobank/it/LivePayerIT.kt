@@ -55,6 +55,12 @@ class LivePayerIT {
             ex.sendResponseHeaders(303, -1)
             ex.close()
         }
+        server.createContext("/tds") { ex ->
+            val body = TDS_PAGE.toByteArray()
+            ex.responseHeaders.add("Content-Type", "text/html; charset=utf-8")
+            ex.sendResponseHeaders(200, body.size.toLong())
+            ex.responseBody.use { it.write(body) }
+        }
         server.createContext("/decoy") { ex ->
             declined += "clicked"
             ex.sendResponseHeaders(204, -1)
@@ -89,7 +95,28 @@ class LivePayerIT {
         assertThat(Files.list(shots).use { it.count() }).isGreaterThanOrEqualTo(3)
     }
 
+    @Test
+    fun `confirms a 3-D Secure page and never presses decline`() {
+        confirmed.clear()
+        declined.clear()
+        LivePayer(LivePayer.TestCard("4242424242424242", "12/30", "123"), Path.of("target", "live-payer-it")).use {
+            it.confirm("http://127.0.0.1:${server.address.port}/tds", "tds") { confirmed.isNotEmpty() }
+        }
+        assertThat(confirmed).hasSize(1)
+        assertThat(declined).isEmpty()
+    }
+
     private companion object {
+        /** Like monobank's test 3-D Secure page: Confirm, Decline and an error button. */
+        val TDS_PAGE =
+            """
+            <!doctype html><html><head><meta charset="utf-8"><title>3-D Secure</title></head><body>
+            <button onclick="fetch('/decoy')">Decline</button>
+            <button onclick="fetch('/decoy')">Error</button>
+            <button onclick="location.href='/confirm'">Confirm</button>
+            </body></html>
+            """.trimIndent()
+
         /** monobank's ids; fields format themselves like the real ones (spaced number, slash in the date). */
         val PAGE =
             """

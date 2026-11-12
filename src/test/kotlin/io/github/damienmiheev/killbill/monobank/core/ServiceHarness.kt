@@ -189,7 +189,6 @@ abstract class ServiceHarness {
             """
             org.killbill.billing.plugin.monobank.merchantToken=env:it
             org.killbill.billing.plugin.monobank.webhookUrl=http://127.0.0.1:${receiver.address.port}/hook
-            org.killbill.billing.plugin.monobank.allowedCurrencies=UAH,EUR,USD
             org.killbill.billing.plugin.monobank.splitReceiverId=${SplitReceiver.DEFAULT.id}
             """.trimIndent()
         return TenantSettingsProvider(
@@ -292,7 +291,10 @@ abstract class ServiceHarness {
     protected fun hold(amount: String = "10.00"): Triple<UUID, UUID, UUID> {
         val (account, pm) = cardHolder()
         val payment = UUID.randomUUID()
-        val auth = stored(payments.charge(op(TransactionType.AUTHORIZE, account, payment, pm, amount)))
+        // monobank answers a saved-card hold `processing` and has it `hold` a moment later (seen live): the status read
+        // settles it, as Kill Bill's Janitor does when it reads the payment
+        val answered = stored(payments.charge(op(TransactionType.AUTHORIZE, account, payment, pm, amount)))
+        val auth = if (answered.state == TxState.PENDING) payments.refreshIfOpen(answered) else answered
         assertThat(auth.state).isEqualTo(TxState.SUCCESS)
         assertThat(fake.invoice(auth.invoiceId!!)!!.status).isEqualTo("hold")
         return Triple(account, pm, payment)

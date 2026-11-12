@@ -70,7 +70,6 @@ class PluginLifecycleIT {
             """
             org.killbill.billing.plugin.monobank.merchantToken=env:it
             org.killbill.billing.plugin.monobank.webhookUrl=https://example.com/webhooks/monobank
-            org.killbill.billing.plugin.monobank.allowedCurrencies=UAH,USD
             """.trimIndent(),
         )
 

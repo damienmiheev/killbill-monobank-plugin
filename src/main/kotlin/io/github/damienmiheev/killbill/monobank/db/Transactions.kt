@@ -195,12 +195,13 @@ class TransactionDao(
                 kb_settled_at = case when ? then ? else kb_settled_at end,
                 updated_at = ?
             where record_id = ? and state = any (?)
-              and (cast(? as timestamptz) is null or mono_modified_at is null or mono_modified_at <= cast(? as timestamptz))
+              and (cast(? as timestamptz) is null or mono_modified_at is null
+                   or date_trunc('second', mono_modified_at) <= cast(? as timestamptz))
             """.trimIndent(),
             change.state,
             change.invoiceId,
             change.monoStatus,
-            change.monoModifiedAt,
+            change.monoModifiedAt?.let(::toSecond),
             change.processedAmountMinor,
             change.state,
             change.errorCode?.take(MAX_TEXT),
@@ -215,8 +216,8 @@ class TransactionDao(
             at,
             recordId,
             Db.TextArray(from.map { it.name }.toTypedArray()),
-            change.monoModifiedAt,
-            change.monoModifiedAt,
+            change.monoModifiedAt?.let(::toSecond),
+            change.monoModifiedAt?.let(::toSecond),
         )
         return findByRecord(recordId)!!
     }
@@ -368,3 +369,10 @@ class TransactionDao(
             )
     }
 }
+
+/**
+ * monobank's times compared and stored to the second: invoice/status gives whole seconds while other answers carry
+ * fractions, so a newer status at 19:04:33 must not lose to an older answer at 19:04:33.525 (seen live: a saved-card
+ * hold stuck PENDING although monobank said `hold`). Final states stay protected by the state rule.
+ */
+private fun toSecond(instant: Instant): Instant = instant.truncatedTo(java.time.temporal.ChronoUnit.SECONDS)

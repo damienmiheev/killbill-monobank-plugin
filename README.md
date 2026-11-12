@@ -29,8 +29,9 @@ What it is built around:
   and refuses a new charge on an account while an earlier one is unresolved.
 - **No lost payments.** Webhooks are the fast path; `getPaymentInfo`, a reconcile job and Kill Bill's Janitor
   are the safety net. Hosted payments complete their Kill Bill invoice payment.
-- **Multi-currency.** Any ISO 4217 currency the merchant's monobank contract allows, with each currency's own
-  minor unit (never an assumed 2 decimals).
+- **Hryvnia only.** monobank converts USD and EUR to hryvnia when they are paid and cannot refund such saved-card
+  payments in full, so the plugin takes UAH only and refuses any other currency (`CURRENCY_NOT_SUPPORTED`) before
+  calling monobank. Accounts in other currencies use another payment plugin.
 - **Card data stays at monobank.** Customers enter cards on monobank's page; the plugin keeps only monobank's
   token, encrypted, and never returns or logs it.
 
@@ -87,7 +88,6 @@ curl -u admin:password \
 # monobank.properties
 org.killbill.billing.plugin.monobank.merchantToken=env:shop
 org.killbill.billing.plugin.monobank.webhookUrl=https://example.com/webhooks/monobank
-org.killbill.billing.plugin.monobank.allowedCurrencies=UAH
 ```
 
 | Key | Required | Meaning |
@@ -97,7 +97,6 @@ org.killbill.billing.plugin.monobank.allowedCurrencies=UAH
 | `redirectUrl` | no | Where monobank's page sends the customer back. |
 | `destination` | no | Default text on monobank's page and receipt. |
 | `language` | no | `uk` (default) or `en`. |
-| `allowedCurrencies` | no | Comma-separated ISO 4217 codes the merchant's contract allows. Default `UAH`. |
 | `checkoutValiditySeconds` | no | Lifetime of a hosted page. Default 3600. |
 | `basketItemCode` | no | When set, every payment carries a one-item basket (`merchantPaymInfo.basketOrder`) with this product code, unless the caller passes its own. Merchants with fiscal receipts or split payments need a basket. |
 | `splitReceiverId` | no | The split receiver every basket item goes to (merchants with split payments). Implies a basket. |
@@ -118,8 +117,7 @@ Plugin properties (`pluginProperty=key=value` on Kill Bill's payment calls):
 | `initiationKind=client` | A saved-card charge made with the customer present (default `merchant`). |
 
 Transactions return `formUrl`, `tdsUrl` (3-D Secure), `invoiceId`, `expiresAt`, `callerRef` and `reference` as plugin
-properties. Holds (AUTHORIZE) on a payment page are UAH only, as monobank enforces; a saved-card hold in
-another currency is sent and monobank decides.
+properties.
 
 Routes under `/plugins/killbill-monobank/`:
 

@@ -115,10 +115,7 @@
         <maven-bundle-plugin.version>6.2.0</maven-bundle-plugin.version>
         <maven-dependency-plugin.version>3.11.0</maven-dependency-plugin.version>
         <maven.compiler.release>11</maven.compiler.release>
-        <monobank-sdk.version>
-            1.0.0-SNAPSHOT
-            <!-- pinned commit until 1.0.0 is on Maven Central: see CI -->
-        </monobank-sdk.version>
+        <monobank-sdk.version>1.0.0</monobank-sdk.version>
         <osgi.extra-import>org.osgi.framework;version="[1.8,2)",!kotlin.*,!com.fasterxml.*,!org.jetbrains.annotations.*,!org.intellij.lang.annotations.*</osgi.extra-import>
         <osgi.private>
             io.github.damienmiheev.killbill.monobank.*
@@ -453,6 +450,76 @@
             <properties>
                 <it.excludedGroups>none</it.excludedGroups>
             </properties>
+        </profile>
+        <profile>
+            <!--
+            Release to Maven Central, used only by the Publish workflow (see RELEASING.md). Kill Bill's parent defines
+            this profile (GPG signing, javadoc, the Central Portal upload); this adds what a Kotlin bundle needs and
+            stops the upload before publishing, so the deployment waits in the portal for the maintainer.
+            -->
+            <id>sonatype-oss-release</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-jar-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <!-- the tests stay unpublished -->
+                                <id>attach-tests</id>
+                                <phase>none</phase>
+                            </execution>
+                            <execution>
+                                <!-- Central requires a javadoc jar; javadoc reads no Kotlin, so it carries the design. -->
+                                <id>javadoc-jar</id>
+                                <goals>
+                                    <goal>jar</goal>
+                                </goals>
+                                <phase>package</phase>
+                                <configuration>
+                                    <classesDirectory>${project.basedir}/docs</classesDirectory>
+                                    <classifier>javadoc</classifier>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-javadoc-plugin</artifactId>
+                        <configuration>
+                            <!-- javadoc reads no Kotlin; the javadoc jar below is the only one -->
+                            <skip>true</skip>
+                        </configuration>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-source-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <!-- the parent's execution also attaches test sources: only the plugin's are published -->
+                                <id>attach-sources</id>
+                                <phase>none</phase>
+                            </execution>
+                            <execution>
+                                <id>release-sources</id>
+                                <goals>
+                                    <goal>jar-no-fork</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.sonatype.central</groupId>
+                        <artifactId>central-publishing-maven-plugin</artifactId>
+                        <configuration>
+                            <!-- the maintainer presses Publish in the Central Portal -->
+                            <autoPublish>false</autoPublish>
+                            <deploymentName>${project.artifactId} ${project.version}</deploymentName>
+                            <waitUntil>validated</waitUntil>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
         </profile>
         <!-- detekt 2 has no Maven plugin: run its CLI (mvn -Pdetekt verify, used by CI). -->
         <profile>
