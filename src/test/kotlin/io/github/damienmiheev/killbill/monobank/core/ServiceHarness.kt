@@ -97,6 +97,8 @@ abstract class ServiceHarness {
                 // like monobank's test merchant: receipts and split payments on
                 .fiscalization(true)
                 .splitPayments(true)
+                // a partial capture settles only when a test says so (monobank took more than 30 s live)
+                .finalizeSettlementDelay(null)
                 .build()
                 .start()
         receiver = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
