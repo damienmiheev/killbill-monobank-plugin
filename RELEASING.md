@@ -4,7 +4,7 @@ The plugin is released to Maven Central as `io.github.damienmiheev:killbill-mono
 with sources and a javadoc jar carrying `docs/design.md`). Kill Bill installs it from there:
 
 ```bash
-kpm install_java_plugin monobank --group-id=io.github.damienmiheev --artifact-id=killbill-monobank-plugin --version=X.Y.Z
+kpm install_java_plugin killbill-monobank --group-id=io.github.damienmiheev --artifact-id=killbill-monobank-plugin --version=X.Y.Z
 ```
 
 Only the maintainer releases. A release must not need a follow-up fix release, so **every step of the verification

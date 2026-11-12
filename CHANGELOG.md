@@ -5,6 +5,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-13
+
+The first release, for Kill Bill 0.24.
+
 ### Added
 
 - Built on the monobank SDK 1.0.0 from Maven Central (`io.github.damienmiheev:monobank-acquiring`).
@@ -25,4 +29,5 @@ and the project uses [Semantic Versioning](https://semver.org/).
   the payment control plugins so invoices are paid, the cancel and public-key routes, and a reconcile job.
 - Encrypted card tokens bound to their payment method, removal at monobank on delete.
 
-[Unreleased]: https://github.com/damienmiheev/killbill-monobank-plugin/commits/main
+[Unreleased]: https://github.com/damienmiheev/killbill-monobank-plugin/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/damienmiheev/killbill-monobank-plugin/releases/tag/v0.1.0
