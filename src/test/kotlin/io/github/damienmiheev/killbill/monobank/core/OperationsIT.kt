@@ -123,6 +123,15 @@ class OperationsIT : ServiceHarness() {
         val early = stored(payments.refund(op(TransactionType.REFUND, account, payment, pm, "6.00")))
         assertThat(early.state).isEqualTo(TxState.CANCELED)
         assertThat(early.errorCode).isEqualTo(PaymentService.CAPTURE_SETTLING)
+        // any other 1004 ("not found") keeps monobank's own code and text
+        fake.injectFault(
+            MonobankPaths.INVOICE_CANCEL,
+            Fault.response(404, """{"errCode":"1004","errText":"invoice not found"}"""),
+        )
+        val notFound = stored(payments.refund(op(TransactionType.REFUND, account, payment, pm, "6.00")))
+        fake.clearFaults()
+        assertThat(notFound.errorCode).isEqualTo("1004")
+        assertThat(notFound.errorMessage).isEqualTo("invoice not found")
         fake.settleFinalize(captured.invoiceId!!)
         val refund = stored(payments.refund(op(TransactionType.REFUND, account, payment, pm, "6.00")))
         assertThat(awaitRow(refund) { it.state.isFinal }.state).isEqualTo(TxState.SUCCESS)

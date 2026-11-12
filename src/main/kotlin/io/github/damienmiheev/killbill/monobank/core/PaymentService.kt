@@ -706,7 +706,7 @@ class PaymentService(
                 if (e is MonobankApiException && e.outcome == RequestOutcome.REJECTED) onRejected(e)
                 // A webhook may have moved the row on while the call ran: a failure never overwrites it.
                 from = setOf(TxState.SENDING)
-                failureChange(e)
+                failureChange(e, row.type)
             } catch (e: Exception) {
                 // A bug or an answer the plugin could not read: the request may have reached monobank.
                 LOG.error("Unexpected failure calling monobank for transaction {}", row.transactionId, e)
@@ -733,7 +733,10 @@ class PaymentService(
         }
     }
 
-    private fun failureChange(e: MonobankException): TxChange =
+    private fun failureChange(
+        e: MonobankException,
+        type: TransactionType,
+    ): TxChange =
         when (e.outcome ?: RequestOutcome.UNKNOWN) {
             RequestOutcome.NOT_SENT -> {
                 TxChange(
@@ -755,13 +758,17 @@ class PaymentService(
                 }
                 // monobank settles a partial capture for a while ("processing"); a refund in that window is refused
                 // with 1004 "order not finished" and nothing is refunded: CANCELED, so the caller simply retries.
-                val settling = code == ORDER_NOT_FINISHED
+                // 1004 is monobank's generic "not found" too, so only that exact refusal of a refund is relabelled.
+                val settling =
+                    type == TransactionType.REFUND && code == ORDER_NOT_FINISHED &&
+                        api?.errorText.equals(ORDER_NOT_FINISHED_TEXT, ignoreCase = true)
                 TxChange(
                     if (decline) TxState.FAILED else TxState.CANCELED,
                     errorCode = if (settling) CAPTURE_SETTLING else code,
                     errorMessage =
                         if (settling) {
-                            "monobank is still settling the capture; nothing was refunded, try again in a minute"
+                            "monobank is still settling the capture; nothing was refunded, try again in a minute " +
+                                "(${api?.errorText})"
                         } else {
                             api?.errorText ?: e.message
                         },
@@ -1104,6 +1111,7 @@ class PaymentService(
         const val CANCELED_BY_MERCHANT = "CANCELED_BY_MERCHANT"
         const val CAPTURE_SETTLING = "CAPTURE_SETTLING"
         private const val ORDER_NOT_FINISHED = "1004"
+        private const val ORDER_NOT_FINISHED_TEXT = "order not finished"
 
         /** Below Kill Bill's 30 s plugin call, with room to store the answer. */
         private val ANSWER_BUDGET: Duration = Duration.ofSeconds(28)
