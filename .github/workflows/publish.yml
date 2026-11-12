@@ -75,7 +75,8 @@ jobs:
             if [ -z "${!name}" ]; then echo "::error::Secret $name is not set in environment maven-central"; exit 1; fi
           done
 
-      # Writes ~/.m2/settings.xml with server `central` (credentials from the env below) and imports the signing key.
+      # Writes ~/.m2/settings.xml with server `central` (credentials from the env below). The signing key never
+      # touches a keyring: maven-gpg-plugin signs in Maven from MAVEN_GPG_KEY (see the pom's release profile).
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: temurin
@@ -83,13 +84,12 @@ jobs:
           server-id: central
           server-username: CENTRAL_USERNAME
           server-password: CENTRAL_PASSWORD
-          gpg-private-key: ${{ secrets.GPG_SIGNING_KEY }}
-          gpg-passphrase: MAVEN_GPG_PASSPHRASE
 
       # The checked commit, rebuilt and signed: the bundle, its sources and a javadoc jar (no test jars).
       - name: Upload to the Central Portal (waits there for Publish)
         env:
           CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
           CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
+          MAVEN_GPG_KEY: ${{ secrets.GPG_SIGNING_KEY }}
           MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_SIGNING_PASSWORD }}
         run: ./mvnw -B -ntp -Psonatype-oss-release -DskipTests -DskipITs clean deploy
