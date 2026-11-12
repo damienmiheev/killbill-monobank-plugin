@@ -1,0 +1,12 @@
+Kill Bill monobank plugin
+Copyright 2026 Dmytro Mikhieiev
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+It is not affiliated with or endorsed by monobank, Universal Bank or The Billing Project.
+
+The bundle embeds the following, each under the Apache License, Version 2.0:
+
+- Kotlin standard library, Copyright JetBrains s.r.o. and Kotlin Programming Language contributors.
+- Jackson JSON processor (jackson-core, jackson-databind, jackson-annotations),
+  Copyright FasterXML, LLC. Jackson is a high-performance JSON processor written by Tatu Saloranta
+  and contributors (https://github.com/FasterXML/jackson).
