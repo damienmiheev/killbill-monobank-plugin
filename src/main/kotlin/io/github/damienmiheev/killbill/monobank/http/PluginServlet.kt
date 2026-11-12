@@ -9,10 +9,9 @@ import io.github.damienmiheev.killbill.monobank.config.TenantSettings
 import io.github.damienmiheev.killbill.monobank.config.TenantSettingsProvider
 import io.github.damienmiheev.killbill.monobank.core.NotificationHandler
 import io.github.damienmiheev.killbill.monobank.core.PaymentService
-import io.github.damienmiheev.killbill.monobank.core.TransactionSettler
 import io.github.damienmiheev.killbill.monobank.db.TxRow
+import io.github.damienmiheev.killbill.monobank.health.MonobankHealthcheck
 import io.github.damienmiheev.killbill.monobank.mono.MonobankClients
-import org.killbill.billing.osgi.api.Healthcheck
 import org.killbill.billing.security.Logical
 import org.killbill.billing.security.Permission
 import org.killbill.billing.security.SecurityApiException
@@ -32,10 +31,11 @@ import javax.servlet.http.HttpServletResponse
  * secret), `healthcheck` returns nothing sensitive, `cancel` and `pubkey` require Kill Bill credentials.
  */
 class PluginServlet(
-    private val healthcheck: Healthcheck,
+    private val healthcheck: MonobankHealthcheck,
     private val notifications: NotificationHandler,
     private val payments: PaymentService,
-    private val settler: TransactionSettler,
+    /** Settles on another thread: the settler logs in as the plugin and would end the caller's session. */
+    private val settleSoon: (TxRow) -> Unit,
     private val tenants: TenantSettingsProvider,
     private val clients: MonobankClients,
     private val security: SecurityApi,
@@ -137,7 +137,13 @@ class PluginServlet(
         req: HttpServletRequest,
         resp: HttpServletResponse,
     ) {
-        val status = healthcheck.getHealthStatus(req.getAttribute(TENANT_ATTRIBUTE) as? Tenant, null)
+        val tenant = req.getAttribute(TENANT_ATTRIBUTE) as? Tenant
+        val status =
+            if (security.isSubjectAuthenticated) {
+                healthcheck.detailedStatus(tenant)
+            } else {
+                healthcheck.getHealthStatus(tenant, null)
+            }
         json(
             resp,
             if (status.isHealthy) HttpServletResponse.SC_OK else HttpServletResponse.SC_SERVICE_UNAVAILABLE,
@@ -172,14 +178,7 @@ class PluginServlet(
         return tenant
     }
 
-    private fun settle(row: TxRow) {
-        try {
-            settler.settle(row)
-        } catch (e: Exception) {
-            // Kill Bill unavailable: the reconcile job settles it later
-            LOG.warn("Could not settle transaction {} now; the reconcile job will", row.transactionId, e)
-        }
-    }
+    private fun settle(row: TxRow) = settleSoon(row)
 
     private fun describe(row: TxRow): Map<String, Any?> =
         mapOf(

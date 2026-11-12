@@ -42,6 +42,7 @@ object SchemaCheck {
                     "save_card",
                     "attempted_at",
                     "next_check_at",
+                    "next_settle_at",
                     "created_at",
                     "updated_at",
                 ),
@@ -88,6 +89,8 @@ object SchemaCheck {
             "monobank_transactions_charge_invoice_uq",
             "monobank_transactions_unresolved_charge_uq",
             "monobank_transactions_unresolved_refund_uq",
+            "monobank_transactions_capture_void_uq",
+            "monobank_transactions_open_invoice_charge_uq",
             "monobank_payment_methods_kb_payment_method_id_uq",
             "monobank_notifications_body_sha256_uq",
         )

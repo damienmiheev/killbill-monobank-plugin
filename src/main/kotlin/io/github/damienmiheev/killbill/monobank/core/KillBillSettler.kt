@@ -24,6 +24,9 @@ import java.util.UUID
 /** Brings Kill Bill in line with a final row; swapped for a recorder in tests. */
 fun interface TransactionSettler {
     fun settle(row: TxRow)
+
+    /** Kill Bill's final status of a row held for review, once an operator has fixed it there; null while open. */
+    fun reviewedStatus(row: TxRow): TxState? = null
 }
 
 /**
@@ -62,9 +65,11 @@ class KillBillSettler(
         context: CallContext,
     ) {
         val account = killbill.accountUserApi.getAccountById(row.accountId, context)
+        // Only this transaction's own attempt says which control plugins ran it (a refund or a capture has none
+        // even when the purchase had them); a payment made without the control API has no attempt at all.
         val controlPlugins =
             payment.paymentAttempts
-                ?.firstOrNull()
+                ?.lastOrNull { it.transactionId == row.transactionId }
                 ?.pluginName
                 ?.split(',')
                 ?.filter {
@@ -96,6 +101,18 @@ class KillBillSettler(
                 LOG.info("Kill Bill transaction {} was no longer pending", row.transactionId)
             } else {
                 throw e
+            }
+        }
+    }
+
+    override fun reviewedStatus(row: TxRow): TxState? {
+        if (row.state != TxState.REVIEW) return null
+        return asPlugin(row.tenantId) {
+            val payment = payment(row.paymentId, withPluginInfo = false, context(row)) ?: return@asPlugin null
+            when (payment.transactions.firstOrNull { it.id == row.transactionId }?.transactionStatus) {
+                TransactionStatus.SUCCESS -> TxState.SUCCESS
+                TransactionStatus.PAYMENT_FAILURE, TransactionStatus.PLUGIN_FAILURE -> TxState.FAILED
+                else -> null
             }
         }
     }

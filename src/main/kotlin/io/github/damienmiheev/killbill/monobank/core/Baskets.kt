@@ -4,6 +4,7 @@
  */
 package io.github.damienmiheev.killbill.monobank.core
 
+import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.github.damienmiheev.killbill.monobank.config.TenantSettings
@@ -16,7 +17,8 @@ import java.math.BigDecimal
  * `basketItemCode` or `splitReceiverId`, the plugin sends one item for the whole amount.
  */
 object Baskets {
-    private val JSON = ObjectMapper()
+    // Exact decimals: a quantity of 0.1 must stay 0.1, not the nearest double.
+    private val JSON = ObjectMapper().enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
 
     /** The tenant's one-item basket, or null when the tenant does not ask for baskets. */
     fun single(
@@ -46,15 +48,17 @@ object Baskets {
         val nodes = runCatching { JSON.readTree(json) }.getOrNull()
         require(nodes != null && nodes.isArray && nodes.size() > 0) { "basketOrder must be a non-empty JSON array" }
         val items = nodes.map(::item)
-        val total = items.sumOf { (it.qty * BigDecimal.valueOf(it.sum)).toLong() }
-        require(total == amountMinor) { "basketOrder adds up to $total, not $amountMinor" }
+        val total = items.fold(BigDecimal.ZERO) { acc, item -> acc + item.qty * BigDecimal.valueOf(item.sum) }
+        require(total.compareTo(BigDecimal.valueOf(amountMinor)) == 0) {
+            "basketOrder adds up to ${total.toPlainString()}, not $amountMinor"
+        }
         return items
     }
 
     private fun item(node: JsonNode): BasketItem {
         val name = node.path("name").asText("")
         val code = node.path("code").asText("")
-        val sum = node.path("sum").asLong(-1)
+        val sum = node.path("sum").takeIf { it.isIntegralNumber && it.canConvertToLong() }?.asLong() ?: -1
         val qty = node.path("qty").takeIf { it.isNumber }?.decimalValue() ?: BigDecimal.ONE
         require(name.isNotBlank() && code.isNotBlank() && sum > 0 && qty.signum() > 0) {
             "each basketOrder item needs name, code, sum > 0 and qty > 0"

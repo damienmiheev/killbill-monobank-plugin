@@ -52,4 +52,13 @@ class BasketsTest {
             Baskets.fromProperty("""[{"name":"","sum":1,"code":"x"}]""", 1)
         }.hasMessageContaining("needs name")
     }
+
+    @Test
+    fun `fractional quantities add up exactly, and a fractional sum is refused`() {
+        val json = """[{"name":"Hours","qty":0.1,"sum":1000,"code":"h"},{"name":"Kg","qty":2.5,"sum":30,"code":"kg"}]"""
+        assertThat(Baskets.fromProperty(json, 175)).hasSize(2)
+        assertThatThrownBy { Baskets.fromProperty(json, 174) }.hasMessageContaining("adds up to")
+        assertThatThrownBy { Baskets.fromProperty("""[{"name":"A","qty":1,"sum":10.5,"code":"a"}]""", 10) }
+            .hasMessageContaining("needs name")
+    }
 }

@@ -67,7 +67,7 @@ Any value may be `env:NAME` to read it from the environment.
 | `merchantTokenBindings` | no | `apiKey:alias[,…]`: lets the tenant with that Kill Bill API key use `merchantToken=env:<alias>`. |
 | `notificationSharedSecret` | no | If set (at least 32 characters), webhook calls must carry it in `X-Notification-Secret` (for setups that forward monobank's webhook). |
 | `apiBaseUrl` | no | Default `https://api.monobank.ua`. https only; plain http only for local and test hosts. |
-| `readTimeoutSeconds` | no | Default 15. |
+| `readTimeoutSeconds` | no | Default 15, at most 25 (Kill Bill gives a plugin call 30 s). |
 | `reconcileIntervalSeconds` | no | Default 300. |
 | `statementMinIntervalSeconds` | no | Default 60. |
 
@@ -125,14 +125,31 @@ Routes under `/plugins/killbill-monobank/`:
 | Route | Auth | What |
 |---|---|---|
 | `POST /notification` | monobank's signature (and `X-Notification-Secret` if configured) | monobank's webhook. |
-| `POST /payments/{paymentId}/cancel` | Kill Bill credentials with `payment:transition` | Gives up an unpaid hosted page: 200 when cancelled, 409 when the customer paid at the same moment. |
+| `POST /payments/{paymentId}/cancel` | Kill Bill credentials with `payment:transition` | Gives up an unpaid hosted page: 200 when cancelled, 409 when the customer paid or is paying, 503 when monobank has not settled the page yet (ask again), 404 for a payment of another tenant. |
 | `GET /pubkey` | Kill Bill credentials | monobank's current webhook public key, for a forwarder that verifies before forwarding. |
-| `GET /healthcheck` | none | Database, schema, counters; with tenant headers also the tenant's settings. |
+| `GET /healthcheck` | none | Database, schema, reconcile job; with Kill Bill credentials also the counters, with tenant headers the tenant's settings. |
 
 ## Health
 
 `GET /plugins/killbill-monobank/healthcheck` (and Kill Bill's `/1.0/healthcheck`). With tenant API key headers it
-also reports whether that tenant's settings are valid. It never calls monobank and never returns secrets.
+also reports whether that tenant's settings are valid. It is unhealthy when the database or schema is missing, the
+tenant's settings are invalid, or the reconcile job has not run for three intervals. The counters an operator alerts
+on (`stateConflict`, `unexpectedReversal`, `amountMismatch`, `unknownClosed`, `signatureFailed`, `holdsNearExpiry`,
+`operationStale`)
+are shown only to authenticated Kill Bill callers. It never calls monobank and never returns secrets.
+
+## Payments that need an operator
+
+- **REVIEW**: monobank reported a different amount or currency than Kill Bill asked for, or held a purchase. The
+  Kill Bill transaction stays `UNKNOWN` and the plugin stores monobank's invoice id and status. Fix the transaction
+  in Kill Bill (admin API); the reconcile job then closes the plugin's row in the same state.
+- **state_conflict**: Kill Bill and monobank disagree on a final state, or monobank reports success for a charge the
+  plugin had closed as failed. Nothing is overwritten; the counter rises and the log names the transaction.
+- **unexpected_reversal**: a refund or chargeback the plugin did not start (made in monobank's portal).
+- **holdsNearExpiry**: holds made more than 7 days ago that are neither captured nor voided; monobank releases them
+  at 9.
+- **operationStale**: a capture, void or refund monobank has not finished after 24 hours; it is held for review
+  because it blocks the next operation on that payment.
 
 ## Security
 

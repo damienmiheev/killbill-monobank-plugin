@@ -37,6 +37,9 @@ class SystemSettings private constructor(
     companion object {
         const val PREFIX = "org.killbill.billing.plugin.monobank."
 
+        /** Kill Bill gives a plugin call 30 s; the monobank call must end before that, with room to store it. */
+        const val MAX_READ_TIMEOUT_SECONDS = 25
+
         private const val KEY_BYTES = 32
         private val KEY_ID = Regex("[A-Za-z0-9_-]{1,32}")
         private const val MIN_SHARED_SECRET_LENGTH = 32
@@ -81,7 +84,8 @@ class SystemSettings private constructor(
             val sharedSecret = sharedSecret(resolved("notificationSharedSecret"), errors)
             val bindings = bindings(raw("merchantTokenBindings"), errors)
             val baseUri = baseUrl(raw("apiBaseUrl") ?: "https://api.monobank.ua", errors)
-            val readTimeout = seconds(raw("readTimeoutSeconds"), "readTimeoutSeconds", 15, 1..120, errors)
+            val readTimeout =
+                seconds(raw("readTimeoutSeconds"), "readTimeoutSeconds", 15, 1..MAX_READ_TIMEOUT_SECONDS, errors)
             val reconcile = seconds(raw("reconcileIntervalSeconds"), "reconcileIntervalSeconds", 300, 30..3600, errors)
             val statement =
                 seconds(raw("statementMinIntervalSeconds"), "statementMinIntervalSeconds", 60, 1..3600, errors)

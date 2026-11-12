@@ -12,6 +12,7 @@ import io.github.damienmiheev.monobank.testkit.MonobankPaths
 import io.github.damienmiheev.monobank.testkit.WebhookDelivery
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.AfterAll
+import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestInstance
@@ -39,6 +40,22 @@ class PaymentFlowIT {
         if (::stack.isInitialized) stack.close()
         if (::fake.isInitialized) fake.close()
     }
+
+    /** One test's faults or held webhooks never reach the next. */
+    @AfterEach
+    fun resetFake() {
+        fake.clearFaults()
+        fake.resume()
+        fake.setWebhookDelivery(WebhookDelivery.AUTOMATIC)
+        fake.dropPendingWebhooks { true }
+    }
+
+    private fun counters(): JsonNode =
+        stack
+            .get("/plugins/killbill-monobank/healthcheck", stack.moneyTenant())
+            .json()
+            .path("details")
+            .path("counters")
 
     private fun JsonNode.tx(index: Int = 0): JsonNode = path("transactions").path(index)
 
@@ -326,9 +343,15 @@ class PaymentFlowIT {
                     properties = mapOf("hosted" to "true"),
                 ).path("paymentId")
                 .asText()
-        fake.payInvoice(stack.payment(tenant, paid, withPluginInfo = true).prop("invoiceId")!!)
+        // The webhook is held back, so it is monobank itself that refuses to remove the paid page.
+        fake.setWebhookDelivery(WebhookDelivery.MANUAL)
+        val paidInvoice = stack.payment(tenant, paid, withPluginInfo = true).prop("invoiceId")!!
+        fake.payInvoice(paidInvoice)
+        val removeCalls = fake.requestCount(MonobankPaths.INVOICE_REMOVE)
         val conflict = stack.post("/plugins/killbill-monobank/payments/$paid/cancel", "", "application/json", tenant)
         assertThat(conflict.status).describedAs(conflict.body).isEqualTo(409)
+        assertThat(fake.requestCount(MonobankPaths.INVOICE_REMOVE) - removeCalls).isEqualTo(1)
+        assertThat(fake.invoice(paidInvoice)!!.status).isEqualTo("success")
         assertThat(stack.awaitPayment(tenant, paid) { it.status() == "SUCCESS" }.status()).isEqualTo("SUCCESS")
 
         val anonymous = stack.get("/plugins/killbill-monobank/pubkey", tenant = null, auth = false)
@@ -336,6 +359,30 @@ class PaymentFlowIT {
         val key = stack.get("/plugins/killbill-monobank/pubkey", tenant)
         assertThat(key.status).isEqualTo(200)
         assertThat(key.json().path("key").asText()).isEqualTo(fake.signer.publicKey)
+    }
+
+    @Test
+    fun `cancelling a page needs credentials, the transition permission and the page's own tenant`() {
+        val tenant = stack.moneyTenant()
+        val account = stack.createAccount(tenant)
+        val pm = stack.addPaymentMethod(tenant, account)
+        val page =
+            stack
+                .pay(tenant, account, pm, "PURCHASE", "21.00", properties = mapOf("hosted" to "true"))
+                .path("paymentId")
+                .asText()
+        val path = "/plugins/killbill-monobank/payments/$page/cancel"
+        val removeCalls = fake.requestCount(MonobankPaths.INVOICE_REMOVE)
+
+        assertThat(stack.post(path, "", "application/json", tenant, auth = false).status).isEqualTo(401)
+        val reader = stack.createUser(listOf("account:create"))
+        assertThat(stack.post(path, "", "application/json", tenant, user = reader).status).isEqualTo(403)
+        val other = stack.createTenant()
+        assertThat(stack.post(path, "", "application/json", other).status).isEqualTo(404)
+        val unknown = "/plugins/killbill-monobank/payments/${java.util.UUID.randomUUID()}/cancel"
+        assertThat(stack.post(unknown, "", "application/json", tenant).status).isEqualTo(404)
+        assertThat(fake.requestCount(MonobankPaths.INVOICE_REMOVE)).isEqualTo(removeCalls)
+        assertThat(stack.payment(tenant, page).status()).isEqualTo("PENDING")
     }
 
     @Test
@@ -353,6 +400,10 @@ class PaymentFlowIT {
         }
         val tooMuch = stack.followUp(tenant, paymentId, "REFUND", "80.00")
         assertThat(tooMuch.status).isNotEqualTo(201)
+        val refused = stack.payment(tenant, paymentId).lastTx()
+        assertThat(refused.path("transactionType").asText()).isEqualTo("REFUND")
+        assertThat(refused.path("status").asText()).isEqualTo("PLUGIN_FAILURE")
+        assertThat(refused.path("gatewayErrorCode").asText()).isEqualTo("INVALID_OPERATION")
         stack.followUp(tenant, paymentId, "REFUND", "70.00")
         val refunded =
             stack.awaitPayment(tenant, paymentId) {
@@ -401,12 +452,62 @@ class PaymentFlowIT {
         val paymentId = pending.path("paymentId").asText()
 
         val invoiceId = stack.payment(tenant, paymentId, withPluginInfo = true).prop("invoiceId")!!
+        val failedBefore = counters().path("signatureFailed").asLong()
         fake.corruptNextWebhookSignatures(10) { it.invoiceId == invoiceId }
         fake.payInvoice(invoiceId)
-        fake.deliverWebhooksNow()
-        Thread.sleep(1000)
+        val delivered = fake.awaitWebhooks(invoiceId, 1, Duration.ofSeconds(10))
+        assertThat(delivered).isNotEmpty
+        assertThat(counters().path("signatureFailed").asLong()).isGreaterThan(failedBefore)
         assertThat(stack.payment(tenant, paymentId).status()).isEqualTo("PENDING")
-        fake.clearFaults()
+    }
+
+    @Test
+    fun `the open health route shows no counters, and webhook bodies above the limit are refused`() {
+        val open = stack.get("/plugins/killbill-monobank/healthcheck", auth = false)
+        assertThat(open.json().path("details").has("counters")).isFalse()
+        assertThat(counters().has("stateConflict")).isTrue()
+
+        val tooLarge =
+            stack.post(
+                "/plugins/killbill-monobank/notification",
+                "x".repeat(70 * 1024),
+                "application/json",
+                auth = false,
+            )
+        assertThat(tooLarge.status).isEqualTo(413)
+    }
+
+    @Test
+    fun `a tenant without monobank settings is refused before anything reaches monobank`() {
+        val tenant = stack.createTenant()
+        val account = stack.createAccount(tenant)
+        val pm = stack.addPaymentMethod(tenant, account)
+        val before = fake.requests().size
+
+        val refused = stack.pay(tenant, account, pm, "PURCHASE", "10.00", properties = mapOf("hosted" to "true"))
+
+        assertThat(refused.status()).isEqualTo("PLUGIN_FAILURE")
+        assertThat(refused.tx().path("gatewayErrorCode").asText()).isEqualTo("CONFIG_INVALID")
+        assertThat(fake.requests().size).isEqualTo(before)
+    }
+
+    @Test
+    fun `deleting a payment method removes its card at monobank, and Kill Bill's refresh keeps the others`() {
+        val tenant = stack.moneyTenant()
+        val (account, pm) = customerWithCard(tenant)
+        val second = stack.addPaymentMethod(tenant, account)
+
+        val refreshed = stack.put("/1.0/kb/accounts/$account/paymentMethods/refresh", tenant)
+        assertThat(refreshed.status).describedAs(refreshed.body).isIn(200, 201, 204)
+        val methods = stack.get("/1.0/kb/accounts/$account/paymentMethods", tenant).json()
+        assertThat(methods.map { it.path("paymentMethodId").asText() }).contains(pm, second)
+
+        val removals = fake.requestCount(MonobankPaths.WALLET_CARD)
+        val deleted = stack.delete("/1.0/kb/paymentMethods/$pm?forceDefaultPmDeletion=true", tenant)
+        assertThat(deleted.status).describedAs(deleted.body).isIn(200, 204)
+        assertThat(fake.requestCount(MonobankPaths.WALLET_CARD) - removals).isEqualTo(1)
+        val left = stack.get("/1.0/kb/accounts/$account/paymentMethods", tenant).json()
+        assertThat(left.map { it.path("paymentMethodId").asText() }).containsExactly(second)
     }
 
     @Test

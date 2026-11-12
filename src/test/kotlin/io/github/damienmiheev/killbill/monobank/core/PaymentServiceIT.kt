@@ -46,220 +46,14 @@ import java.util.concurrent.Callable
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 
-/**
- * The payment logic against the SDK's fake monobank on this machine and a real PostgreSQL, without Kill Bill, with a
- * clock the test controls. Covers what the Kill Bill tests cannot reach: requests that never left, unknown outcomes
- * resolved from the statement, the 24-hour close, lost card webhooks, page expiry, concurrent charges, duplicate and
- * reordered webhooks, amount mismatches.
- */
-@TestInstance(TestInstance.Lifecycle.PER_CLASS)
-class PaymentServiceIT {
-    private lateinit var pg: PostgreSQLContainer
-    private lateinit var fake: FakeMonobankAcquiring
-    private lateinit var receiver: HttpServer
-    private var clock = Instant.now()
-    private val tenantId = UUID.randomUUID()
-    private val settled = CopyOnWriteArrayList<TxRow>()
-
-    private lateinit var transactions: TransactionDao
-    private lateinit var paymentMethods: PaymentMethodDao
-    private lateinit var payments: PaymentService
-    private lateinit var handler: NotificationHandler
-    private lateinit var reconcile: ReconcileJob
-    private lateinit var metrics: PluginMetrics
-
-    @BeforeAll
-    fun start() {
-        val image = DockerImageName.parse(System.getProperty("killbill.db.image")).asCompatibleSubstituteFor("postgres")
-        pg = PostgreSQLContainer(image).also { it.start() }
-        val ds =
-            PGSimpleDataSource().apply {
-                setURL(pg.jdbcUrl)
-                user = pg.username
-                password = pg.password
-            }
-        ds.connection.use { c ->
-            c.createStatement().use { it.execute(Files.readString(Path.of(System.getProperty("plugin.ddl")))) }
-        }
-        fake = FakeMonobankAcquiring().start()
-        receiver = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-        receiver.createContext("/hook") { exchange ->
-            val result =
-                handler.handle(
-                    exchange.requestBody.readAllBytes(),
-                    exchange.requestHeaders.getFirst("X-Sign"),
-                    null,
-                )
-            exchange.sendResponseHeaders(result.httpStatus, -1)
-            exchange.close()
-        }
-        receiver.start()
-
-        val settings = systemSettings()
-        val tenants = tenants()
-        val now = { clock }
-        val db = Db(ds)
-        transactions = TransactionDao(db, now)
-        paymentMethods = PaymentMethodDao(db, now)
-        val notifications = NotificationDao(db, now)
-        val cipher = CardTokenCipher(settings.cardKeys, settings.currentCardKeyId, settings.tokenHmacKey)
-        val clients = MonobankClients(settings)
-        metrics = PluginMetrics()
-        payments = PaymentService(transactions, paymentMethods, clients, tenants, cipher, metrics, now)
-        val cards = CardService(paymentMethods, clients, tenants, cipher)
-        val settler =
-            TransactionSettler { row ->
-                settled += row
-                transactions.markSettled(row.recordId)
-            }
-        handler =
-            NotificationHandler(
-                settings,
-                tenants,
-                clients,
-                transactions,
-                paymentMethods,
-                notifications,
-                payments,
-                settler,
-                metrics,
-                now,
-            )
-        reconcile =
-            ReconcileJob(
-                settings,
-                tenants,
-                clients,
-                transactions,
-                paymentMethods,
-                notifications,
-                payments,
-                cards,
-                settler,
-                metrics,
-                now,
-            )
-    }
-
-    private fun systemSettings(): SystemSettings {
-        val key = Base64.getEncoder().encodeToString(ByteArray(32) { 3 })
-        val p = SystemSettings.PREFIX
-        return SystemSettings.load(
-            mapOf(
-                "${p}kbUsername" to "u",
-                "${p}kbPassword" to "p",
-                "${p}cardKeys" to "k1:$key",
-                "${p}tokenHmacKey" to key,
-                "${p}apiBaseUrl" to fake.localBaseUrl,
-                "${p}readTimeoutSeconds" to "2",
-                "${p}statementMinIntervalSeconds" to "1",
-            )::get,
-        ) { null }
-    }
-
-    private fun tenants(): TenantSettingsProvider {
-        val config =
-            """
-            org.killbill.billing.plugin.monobank.merchantToken=env:it
-            org.killbill.billing.plugin.monobank.webhookUrl=http://127.0.0.1:${receiver.address.port}/hook
-            org.killbill.billing.plugin.monobank.allowedCurrencies=UAH,USD
-            """.trimIndent()
-        return TenantSettingsProvider(
-            readRaw = { config },
-            boundAlias = { "it" },
-            env = mapOf("MONOBANK_MERCHANT_TOKEN_IT" to fake.token)::get,
-        )
-    }
-
-    @AfterAll
-    fun stop() {
-        runCatching { receiver.stop(0) }
-        runCatching { fake.close() }
-        runCatching { pg.stop() }
-    }
-
-    @BeforeEach
-    fun freshClock() {
-        clock = Instant.now()
-        fake.setWebhookDelivery(WebhookDelivery.AUTOMATIC)
-    }
-
-    @AfterEach
-    fun clearFaults() {
-        fake.clearFaults()
-        runCatching { fake.resume() }
-    }
-
-    private fun op(
-        type: TransactionType,
-        account: UUID,
-        payment: UUID,
-        pm: UUID?,
-        amount: String?,
-        vararg props: Pair<String, String>,
-    ) = Operation(
-        type = type,
-        tenantId = tenantId,
-        accountId = account,
-        paymentId = payment,
-        transactionId = UUID.randomUUID(),
-        paymentMethodId = pm,
-        amount = amount?.let(::BigDecimal),
-        currency = Currency.UAH,
-        properties = Properties(props.map { PluginProperty(it.first, it.second, false) }),
-    )
-
-    private fun stored(answer: Answer): TxRow = (answer as Answer.Stored).row
-
-    private fun awaitRow(
-        row: TxRow,
-        done: (TxRow) -> Boolean,
-    ): TxRow {
-        val deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos()
-        var current = transactions.findByRecord(row.recordId)!!
-        while (!done(current)) {
-            check(System.nanoTime() < deadline) { "row never reached the expected state: $current" }
-            Thread.sleep(100)
-            current = transactions.findByRecord(row.recordId)!!
-        }
-        return current
-    }
-
-    /** An account with a card saved through a paid hosted page. */
-    private fun cardHolder(): Pair<UUID, UUID> {
-        val account = UUID.randomUUID()
-        val pm = UUID.randomUUID()
-        paymentMethods.add(tenantId, account, pm)
-        val hosted =
-            stored(
-                payments.charge(
-                    op(
-                        TransactionType.PURCHASE,
-                        account,
-                        UUID.randomUUID(),
-                        pm,
-                        "1.00",
-                        "hosted" to "true",
-                        "saveCard" to "true",
-                    ),
-                ),
-            )
-        fake.payInvoice(hosted.invoiceId!!)
-        awaitRow(hosted) { it.state == TxState.SUCCESS }
-        val deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos()
-        while (paymentMethods.find(pm)!!.cardStatus != CardStatus.ACTIVE) {
-            check(System.nanoTime() < deadline) { "card never saved" }
-            Thread.sleep(100)
-        }
-        return account to pm
-    }
-
+/** Charges, idempotency, unknown outcomes and webhooks against the fake monobank and a real PostgreSQL. */
+class PaymentServiceIT : ServiceHarness() {
     @Test
     fun `a request that never left is CANCELED and a retry with a new transaction succeeds`() {
         val (account, pm) = cardHolder()
         fake.pause()
         val refused = stored(payments.charge(op(TransactionType.PURCHASE, account, UUID.randomUUID(), pm, "5.00")))
-        runCatching { fake.resume() }
+        fake.resume()
 
         assertThat(refused.state).isEqualTo(TxState.CANCELED)
         assertThat(refused.errorCode).isEqualTo(PaymentService.NOT_SENT)
@@ -488,31 +282,8 @@ class PaymentServiceIT {
 
         assertThat(
             handler.handle(body.toByteArray(), "bm90IGEgc2lnbmF0dXJl", null),
-        ).isEqualTo(NotificationHandler.Result.IGNORED)
+        ).isEqualTo(NotificationHandler.Result.UNAUTHORIZED)
         assertThat(transactions.findByRecord(hosted.recordId)!!.state).isEqualTo(TxState.PENDING)
-    }
-
-    @Test
-    fun `a refund whose answer was lost is settled from the invoice's cancel list`() {
-        val (account, pm) = cardHolder()
-        val payment = UUID.randomUUID()
-        assertThat(
-            stored(payments.charge(op(TransactionType.PURCHASE, account, payment, pm, "20.00"))).state,
-        ).isEqualTo(TxState.SUCCESS)
-
-        fake.setWebhookDelivery(WebhookDelivery.MANUAL) // the answer and the webhook are both lost
-        fake.injectFault(MonobankPaths.INVOICE_CANCEL, Fault.timeout())
-        val refund = stored(payments.refund(op(TransactionType.REFUND, account, payment, pm, "5.00")))
-        fake.clearFaults()
-        assertThat(refund.state).isEqualTo(TxState.UNKNOWN)
-
-        val tooMuch = payments.refund(op(TransactionType.REFUND, account, payment, pm, "20.00"))
-        assertThat(tooMuch).isInstanceOf(Answer.Refused::class.java)
-
-        fake.dropPendingWebhooks { true }
-        clock = clock.plus(Duration.ofMinutes(3))
-        reconcile.runOnce()
-        assertThat(awaitRow(refund) { it.state.isFinal }.state).isEqualTo(TxState.SUCCESS)
     }
 
     @Test
@@ -552,5 +323,119 @@ class PaymentServiceIT {
                 ),
             )
         assertThat((answer as Answer.Refused).code).isEqualTo(PaymentService.INVALID_BASKET)
+    }
+
+    @Test
+    fun `a webhook for an unknown reference, or one that points at another invoice, changes nothing`() {
+        val page = hostedPage()
+        val json = fake.invoice(page.invoiceId!!)!!.statusJson.replace("\"created\"", "\"success\"")
+
+        val stranger =
+            json
+                .replace(page.invoiceId, "unknown-invoice-1")
+                .replace(page.reference.toString(), UUID.randomUUID().toString())
+        assertThat(handler.handle(stranger.toByteArray(), fake.signer.sign(stranger), null))
+            .isEqualTo(NotificationHandler.Result.IGNORED)
+
+        val misdirected = json.replace(page.invoiceId, "unknown-invoice-2")
+        assertThat(handler.handle(misdirected.toByteArray(), fake.signer.sign(misdirected), null))
+            .isEqualTo(NotificationHandler.Result.IGNORED)
+
+        assertThat(transactions.findByRecord(page.recordId)!!.state).isEqualTo(TxState.PENDING)
+    }
+
+    @Test
+    fun `a refund made outside the plugin is reported as an unexpected reversal`() {
+        val (account, pm) = cardHolder()
+        val charge = stored(payments.charge(op(TransactionType.PURCHASE, account, UUID.randomUUID(), pm, "12.00")))
+        val before = metrics.unexpectedReversal.get()
+
+        fake.refundExternally(charge.invoiceId!!, 500)
+        fake.awaitWebhooks(charge.invoiceId, 1, Duration.ofSeconds(5))
+
+        val deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos()
+        while (metrics.unexpectedReversal.get() == before) {
+            check(System.nanoTime() < deadline) { "the reversal was never reported" }
+            Thread.sleep(100)
+        }
+        assertThat(transactions.findByRecord(charge.recordId)!!.state).isEqualTo(TxState.SUCCESS)
+    }
+
+    @Test
+    fun `a success reported after the charge was closed as failed is a conflict, never a silent change`() {
+        val page = hostedPage()
+        fake.expireInvoice(page.invoiceId!!)
+        assertThat(payments.refreshIfOpen(page).state).isEqualTo(TxState.FAILED)
+        val before = metrics.stateConflict.get()
+
+        val late = fake.invoice(page.invoiceId)!!.statusJson.replace("\"expired\"", "\"success\"")
+        handler.handle(late.toByteArray(), fake.signer.sign(late), null)
+
+        assertThat(metrics.stateConflict.get()).isGreaterThan(before)
+        assertThat(transactions.findByRecord(page.recordId)!!.state).isEqualTo(TxState.FAILED)
+    }
+
+    @Test
+    fun `after monobank rotates its key, webhooks verify with the new one, and an unreachable key asks for a retry`() {
+        try {
+            val page = hostedPage()
+            fake.rotateKey()
+            handler = newHandler() // a node that has not fetched the key yet, as after a restart
+            val paid = fake.invoice(page.invoiceId!!)!!.statusJson.replace("\"created\"", "\"success\"")
+            assertThat(handler.handle(paid.toByteArray(), fake.signer.sign(paid), null))
+                .isEqualTo(NotificationHandler.Result.APPLIED)
+
+            val other = hostedPage()
+            fake.rotateKey()
+            handler = newHandler()
+            val body = fake.invoice(other.invoiceId!!)!!.statusJson.replace("\"created\"", "\"success\"")
+            val signature = fake.signer.sign(body)
+            fake.pause()
+            try {
+                assertThat(handler.handle(body.toByteArray(), signature, null))
+                    .isEqualTo(NotificationHandler.Result.RETRY_LATER)
+            } finally {
+                fake.resume()
+            }
+            assertThat(transactions.findByRecord(other.recordId)!!.state).isEqualTo(TxState.PENDING)
+        } finally {
+            handler = newHandler() // the rest of the class verifies with the current key
+        }
+    }
+
+    @Test
+    fun `a saved card asked for 3-D Secure stays pending with its link, then fails when it expires`() {
+        val (account, pm) = cardHolder()
+        fake.enqueueWalletPaymentOutcome(
+            io.github.damienmiheev.monobank.testkit.WalletPaymentOutcome
+                .threeDs(),
+        )
+        val pending =
+            stored(
+                payments.charge(
+                    op(TransactionType.PURCHASE, account, UUID.randomUUID(), pm, "2.50", "initiationKind" to "client"),
+                ),
+            )
+        assertThat(pending.state).isEqualTo(TxState.PENDING)
+        assertThat(pending.tdsUrl).isNotBlank
+
+        fake.expireInvoice(pending.invoiceId!!)
+        val failed = payments.refreshIfOpen(pending)
+        assertThat(failed.state).isEqualTo(TxState.FAILED)
+        assertThat(failed.errorCode).isEqualTo(PaymentService.EXPIRED)
+    }
+
+    @Test
+    fun `a declined saved-card charge fails with monobank's code`() {
+        val (account, pm) = cardHolder()
+        fake.enqueueWalletPaymentOutcome(
+            io.github.damienmiheev.monobank.testkit.WalletPaymentOutcome
+                .declined("59", "insufficient funds"),
+        )
+        val declined = stored(payments.charge(op(TransactionType.PURCHASE, account, UUID.randomUUID(), pm, "2.00")))
+
+        assertThat(declined.state).isEqualTo(TxState.FAILED)
+        assertThat(declined.errorCode).isEqualTo("59")
+        assertThat(paymentMethods.find(pm)!!.cardStatus).isEqualTo(CardStatus.ACTIVE)
     }
 }

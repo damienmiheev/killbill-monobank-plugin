@@ -65,7 +65,7 @@ class PaymentMethodDao(
                 at,
             )
         } catch (e: SQLException) {
-            if (Db.violatedConstraint(e) != "monobank_payment_methods_kb_payment_method_id_uq") throw e
+            if (!Db.isUniqueViolation(e)) throw e
         }
         return find(paymentMethodId)!!
     }
@@ -119,7 +119,7 @@ class PaymentMethodDao(
             update monobank_payment_methods set card_status = 'ACTIVE', card_token_ciphertext = ?, card_token_key_id = ?,
                 card_token_hmac = ?, masked_pan = coalesce(?, masked_pan), card_brand = coalesce(?, card_brand),
                 card_country = coalesce(?, card_country), updated_at = ?
-            where kb_payment_method_id = ? and card_status in ('NONE', 'PENDING', 'FAILED')
+            where kb_payment_method_id = ? and card_status in ('NONE', 'PENDING')
             """.trimIndent(),
             ciphertext,
             keyId,
@@ -246,7 +246,7 @@ class NotificationDao(
             )
             true
         } catch (e: SQLException) {
-            if (Db.violatedConstraint(e) != "monobank_notifications_body_sha256_uq") throw e
+            if (!Db.isUniqueViolation(e)) throw e
             false
         }
 

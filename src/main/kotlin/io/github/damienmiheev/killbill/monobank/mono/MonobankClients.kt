@@ -9,6 +9,7 @@ import io.github.damienmiheev.killbill.monobank.config.SystemSettings
 import io.github.damienmiheev.monobank.acquiring.AcquiringConfig
 import io.github.damienmiheev.monobank.acquiring.MonobankAcquiring
 import io.github.damienmiheev.monobank.core.MonobankClientOptions
+import io.github.damienmiheev.monobank.core.RetryPolicy
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 
@@ -33,6 +34,12 @@ class MonobankClients(
             )
         }
 
+    /** How long one monobank request may take (no retries: see [defaultOptions]). */
+    val requestTimeout: Duration get() = Duration.ofSeconds(settings.readTimeoutSeconds)
+
+    /** Drops every client (on stop), so no merchant token outlives the plugin in memory. */
+    fun clear() = clients.clear()
+
     companion object {
         const val CMS_NAME = "killbill-monobank"
 
@@ -45,6 +52,9 @@ class MonobankClients(
                 .connectTimeout(Duration.ofSeconds(CONNECT_TIMEOUT_SECONDS))
                 .requestTimeout(Duration.ofSeconds(settings.readTimeoutSeconds))
                 .userAgentSuffix(CMS_NAME)
+                // No retries inside a call: a plugin call must end within Kill Bill's 30 s, and the reconcile job
+                // retries on its own schedule. One request takes at most readTimeoutSeconds.
+                .retryPolicy(RetryPolicy.builder().maxRetries(0).build())
                 .build()
 
         private const val CONNECT_TIMEOUT_SECONDS = 5L

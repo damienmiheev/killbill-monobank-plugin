@@ -13,6 +13,7 @@ import io.github.damienmiheev.killbill.monobank.core.KillBillSettler
 import io.github.damienmiheev.killbill.monobank.core.NotificationHandler
 import io.github.damienmiheev.killbill.monobank.core.PaymentService
 import io.github.damienmiheev.killbill.monobank.core.PluginMetrics
+import io.github.damienmiheev.killbill.monobank.core.TransactionSettler
 import io.github.damienmiheev.killbill.monobank.crypto.CardTokenCipher
 import io.github.damienmiheev.killbill.monobank.db.Db
 import io.github.damienmiheev.killbill.monobank.db.NotificationDao
@@ -77,6 +78,30 @@ class MonobankActivator : KillbillActivatorBase() {
         val payments = PaymentService(transactions, paymentMethods, clients, tenants, cipher, metrics, now)
         val cards = CardService(paymentMethods, clients, tenants, cipher)
         val settler = KillBillSettler(killbillAPI, settings, transactions, metrics) { clock.clock.utcNow }
+        val healthcheck =
+            MonobankHealthcheck(
+                dataSource.dataSource,
+                tenants,
+                metrics,
+                java.time.Duration.ofSeconds(settings.reconcileIntervalSeconds),
+                now,
+            )
+        val job =
+            ReconcileJob(
+                settings,
+                tenants,
+                clients,
+                transactions,
+                paymentMethods,
+                notificationDao,
+                payments,
+                cards,
+                settler,
+                metrics,
+                now,
+            )
+        this.clients = clients
+        reconcile = job
         val notifications =
             NotificationHandler(
                 settings,
@@ -86,11 +111,11 @@ class MonobankActivator : KillbillActivatorBase() {
                 paymentMethods,
                 notificationDao,
                 payments,
-                settler,
+                // on the job's thread: the settler logs in as the plugin, never on a request thread
+                TransactionSettler { job.settleSoon(it) },
                 metrics,
                 now,
             )
-        val healthcheck = MonobankHealthcheck(dataSource.dataSource, tenants, metrics)
 
         register(
             context,
@@ -105,26 +130,13 @@ class MonobankActivator : KillbillActivatorBase() {
                 healthcheck,
                 notifications,
                 payments,
-                settler,
+                job::settleSoon,
                 tenants,
                 clients,
                 killbillAPI.securityApi,
             ) as HttpServlet,
         )
-        reconcile =
-            ReconcileJob(
-                settings,
-                tenants,
-                clients,
-                transactions,
-                paymentMethods,
-                notificationDao,
-                payments,
-                cards,
-                settler,
-                metrics,
-                now,
-            ).also { it.start() }
+        job.start()
         LOG.info("monobank plugin started: {}", settings)
     }
 
@@ -149,14 +161,20 @@ class MonobankActivator : KillbillActivatorBase() {
         )
     }
 
-    override fun stop(context: BundleContext) {
+    // Kill Bill's restart (the plugin's restart file) calls this without stop(): the job must end here too.
+    override fun stopAllButRestartMechanism(context: BundleContext) {
         reconcile?.close()
         reconcile = null
-        super.stop(context)
+        clients?.clear()
+        clients = null
+        super.stopAllButRestartMechanism(context)
     }
 
     @Volatile
     private var reconcile: ReconcileJob? = null
+
+    @Volatile
+    private var clients: MonobankClients? = null
 
     private fun <S> register(
         context: BundleContext,

@@ -11,6 +11,7 @@ import io.github.damienmiheev.killbill.monobank.core.CardService
 import io.github.damienmiheev.killbill.monobank.core.PaymentService
 import io.github.damienmiheev.killbill.monobank.core.PluginMetrics
 import io.github.damienmiheev.killbill.monobank.core.TransactionSettler
+import io.github.damienmiheev.killbill.monobank.db.CardStatus
 import io.github.damienmiheev.killbill.monobank.db.NotificationDao
 import io.github.damienmiheev.killbill.monobank.db.PaymentMethodDao
 import io.github.damienmiheev.killbill.monobank.db.TransactionDao
@@ -30,6 +31,7 @@ import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 
@@ -68,36 +70,77 @@ class ReconcileJob(
         )
     }
 
+    /** Settles [row] on the job's own thread, never on a caller's (the settler logs in as the plugin's user). */
+    fun settleSoon(row: TxRow) {
+        try {
+            executor.execute { settleQuietly(row) }
+        } catch (e: RejectedExecutionException) {
+            LOG.debug("Plugin stopping; transaction {} is settled after the restart", row.transactionId, e)
+        }
+    }
+
     override fun close() {
         executor.shutdownNow()
+        try {
+            if (!executor.awaitTermination(STOP_WAIT_SECONDS, TimeUnit.SECONDS)) {
+                LOG.warn("Reconcile run still busy after {} s; left to finish on its own", STOP_WAIT_SECONDS)
+            }
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
     }
 
     private fun runSafely() {
         try {
             runOnce()
-        } catch (e: Exception) {
-            // never let one failure stop the schedule
+        } catch (e: Throwable) {
+            // never let one failure stop the schedule (an Error is logged too, then the next run tries again)
             LOG.error("Reconcile run failed; next run in {} s", settings.reconcileIntervalSeconds, e)
         }
     }
 
     /** One pass over everything that needs attention. Public for tests and operators. */
     fun runOnce() {
+        heartbeat()
         transactions.unsettled(BATCH).filter(::settleable).forEach(::settleQuietly)
         val inFlight = Duration.ofSeconds(settings.readTimeoutSeconds).plus(SENDING_MARGIN)
         for (row in transactions.dueOpen(BATCH, now().minus(maxOf(MIN_AGE, inFlight)))) {
+            heartbeat()
             try {
                 reconcile(row)
             } catch (e: MonobankException) {
-                LOG.info("monobank unavailable for transaction {} ({}); next run", row.transactionId, e.outcome)
+                LOG.info("monobank unavailable for transaction {} ({}); retried later", row.transactionId, e.outcome)
+                transactions.reschedule(row.recordId, now().plus(MIN_AGE))
+            } catch (e: Exception) {
+                // one broken row must not stop the others; it is looked at again later, not in a tight loop
+                LOG.error("Could not reconcile transaction {}", row.transactionId, e)
+                transactions.reschedule(row.recordId, now().plus(BROKEN_ROW_BACKOFF))
             }
         }
         for (pm in paymentMethods.pendingCards(now().minus(MIN_AGE), BATCH)) {
             pollCard(pm.tenantId, pm.sourceInvoiceId!!)
         }
+        resolveReviews()
+        metrics.holdsNearExpiry.set(transactions.holdsOlderThan(now().minus(HOLD_WARNING_AGE)))
         cards.retryRemovals(BATCH)
         notifications.prune(now().minus(NOTIFICATION_RETENTION))
-        metrics.lastReconcileRun.set(now())
+        heartbeat()
+    }
+
+    /** The health check's sign of life, set as the run goes: a long run over slow monobank answers is no stall. */
+    private fun heartbeat() = metrics.lastReconcileRun.set(now())
+
+    /** A row held for review is closed once an operator has fixed its Kill Bill transaction (design A11). */
+    private fun resolveReviews() {
+        for (row in transactions.review(BATCH)) {
+            try {
+                val state = settler.reviewedStatus(row) ?: continue
+                transactions.transition(row.recordId, setOf(TxState.REVIEW), TxChange(state, settled = true))
+                LOG.info("Transaction {} reviewed in Kill Bill as {}; closed", row.transactionId, state)
+            } catch (e: Exception) {
+                LOG.warn("Could not read the review of transaction {}; next run", row.transactionId, e)
+            }
+        }
     }
 
     private fun reconcile(row: TxRow) {
@@ -121,7 +164,11 @@ class ReconcileJob(
     ) {
         val attempted = row.attemptedAt ?: row.createdAt
         val last = lastStatementCall[row.tenantId]
-        if (last != null && last.plusSeconds(settings.statementMinIntervalSeconds).isAfter(now())) return
+        if (last != null && last.plusSeconds(settings.statementMinIntervalSeconds).isAfter(now())) {
+            // the statement was read moments ago: come back after the interval instead of filling every batch
+            transactions.reschedule(row.recordId, last.plusSeconds(settings.statementMinIntervalSeconds))
+            return
+        }
         lastStatementCall[row.tenantId] = now()
         val found = client.merchant.findByReference(row.reference.toString(), attempted.minus(STATEMENT_LEAD))
         val item = found.firstOrNull()
@@ -186,8 +233,27 @@ class ReconcileJob(
                 return
             }
         }
-        val next = RECHECKS.firstOrNull { attempted.plus(it).isAfter(now()) } ?: GIVE_UP_AFTER
-        transactions.reschedule(row.recordId, maxOf(attempted.plus(next), now().plus(MIN_AGE)))
+        if (row.state == TxState.PENDING && row.type in FOLLOW_UPS && age >= GIVE_UP_AFTER) {
+            // monobank never finished a capture, void or refund: it blocks the next one, so an operator decides.
+            metrics.operationStale.incrementAndGet()
+            LOG.error(
+                "operation_stale: {} {} still processing at monobank after {} (invoice {}); held for review",
+                row.type,
+                row.transactionId,
+                age,
+                row.invoiceId,
+            )
+            transactions.transition(
+                row.recordId,
+                setOf(TxState.PENDING),
+                TxChange(TxState.REVIEW, errorCode = "OPERATION_STALE", errorMessage = "still processing after $age"),
+            )
+            return
+        }
+        val next = RECHECKS.firstOrNull { attempted.plus(it).isAfter(now()) }
+        // A page or operation still pending after the last re-check is asked about every few hours, not every run.
+        val at = if (next == null) now().plus(LATE_RECHECK) else maxOf(attempted.plus(next), now().plus(MIN_AGE))
+        transactions.reschedule(row.recordId, at)
     }
 
     private fun pollCard(
@@ -202,13 +268,15 @@ class ReconcileJob(
                 paymentMethods.findBySourceInvoice(invoiceId).forEach {
                     paymentMethods.setStatus(
                         it.paymentMethodId,
-                        io.github.damienmiheev.killbill.monobank.db.CardStatus.FAILED,
-                        setOf(io.github.damienmiheev.killbill.monobank.db.CardStatus.PENDING),
+                        CardStatus.FAILED,
+                        setOf(CardStatus.PENDING),
                     )
                 }
             }
         } catch (e: MonobankException) {
             LOG.info("Could not poll card invoice {} ({})", invoiceId, e.outcome)
+        } catch (e: Exception) {
+            LOG.error("Could not apply card invoice {}", invoiceId, e)
         }
     }
 
@@ -222,8 +290,13 @@ class ReconcileJob(
         try {
             settler.settle(row)
         } catch (e: Exception) {
-            // Kill Bill unavailable: next run
-            LOG.warn("Could not settle transaction {}; next run", row.transactionId, e)
+            // Kill Bill unavailable
+            LOG.warn("Could not settle transaction {}; tried again later", row.transactionId, e)
+        }
+        // Not settled (Kill Bill busy, payment not found, nothing to do yet): back off instead of retrying each run.
+        val after = transactions.findByRecord(row.recordId) ?: return
+        if (after.kbSettledAt == null && after.state.isFinal && after.state != TxState.CANCELED) {
+            transactions.deferSettle(row.recordId, now().plus(SETTLE_BACKOFF))
         }
     }
 
@@ -234,12 +307,18 @@ class ReconcileJob(
         val LOG = LoggerFactory.getLogger(ReconcileJob::class.java)
         const val BATCH = 100
         val CHARGES = setOf(TransactionType.PURCHASE, TransactionType.AUTHORIZE)
+        val FOLLOW_UPS = setOf(TransactionType.CAPTURE, TransactionType.VOID, TransactionType.REFUND)
         val MIN_AGE: Duration = Duration.ofMinutes(2)
         val SENDING_MARGIN: Duration = Duration.ofSeconds(60)
         val STATEMENT_LEAD: Duration = Duration.ofMinutes(5)
         val EXPIRY_MARGIN: Duration = Duration.ofMinutes(5)
         val RECHECKS: List<Duration> = listOf(Duration.ofMinutes(15), Duration.ofHours(1), Duration.ofHours(6))
         val GIVE_UP_AFTER: Duration = Duration.ofHours(24)
+        val LATE_RECHECK: Duration = Duration.ofHours(6)
+        val BROKEN_ROW_BACKOFF: Duration = Duration.ofMinutes(30)
+        val SETTLE_BACKOFF: Duration = Duration.ofMinutes(5)
+        val HOLD_WARNING_AGE: Duration = Duration.ofDays(7)
+        const val STOP_WAIT_SECONDS = 10L
         val NOTIFICATION_RETENTION: Duration = Duration.ofDays(400)
     }
 }

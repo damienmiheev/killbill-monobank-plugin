@@ -15,6 +15,8 @@ class PluginMetrics {
     val amountMismatch = AtomicLong()
     val unknownClosed = AtomicLong()
     val signatureFailed = AtomicLong()
+    val holdsNearExpiry = AtomicLong()
+    val operationStale = AtomicLong()
     val lastReconcileRun = AtomicReference<Instant?>(null)
     val lastWebhookVerified = AtomicReference<Instant?>(null)
     val lastMonobankCall = AtomicReference<Instant?>(null)
@@ -26,6 +28,8 @@ class PluginMetrics {
             "amountMismatch" to amountMismatch.get(),
             "unknownClosed" to unknownClosed.get(),
             "signatureFailed" to signatureFailed.get(),
+            "holdsNearExpiry" to holdsNearExpiry.get(),
+            "operationStale" to operationStale.get(),
         ).apply {
             lastReconcileRun.get()?.let { put("lastReconcileRun", it.toString()) }
             lastWebhookVerified.get()?.let { put("lastWebhookVerified", it.toString()) }

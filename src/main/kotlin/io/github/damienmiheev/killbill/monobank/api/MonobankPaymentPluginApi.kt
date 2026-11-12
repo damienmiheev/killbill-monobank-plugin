@@ -376,7 +376,7 @@ class MonobankPaymentPluginApi(
             row.invoiceId,
             row.reference.toString(),
             properties,
-            effectiveAt = row.updatedAt.toDateTime(),
+            effectiveAt = (row.monoModifiedAt ?: row.updatedAt).toDateTime(),
         )
     }
 

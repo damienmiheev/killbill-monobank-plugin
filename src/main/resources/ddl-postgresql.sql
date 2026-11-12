@@ -1,6 +1,7 @@
 -- Kill Bill monobank plugin schema (PostgreSQL).
 -- Applied by the operator; the plugin checks it on start and never creates or alters tables itself.
--- Later changes ship as migration/V<yyyyMMddHHmm>__<what>.sql.
+-- Nothing is released yet, so this file is still the whole schema. From the first release on, changes ship as
+-- migration/V<yyyyMMddHHmm>__<what>.sql.
 
 create table monobank_transactions (
     record_id              bigserial primary key,
@@ -29,6 +30,7 @@ create table monobank_transactions (
     save_card              boolean      not null default false,
     attempted_at           timestamptz,
     next_check_at          timestamptz,
+    next_settle_at         timestamptz,
     created_at             timestamptz  not null,
     updated_at             timestamptz  not null,
     constraint monobank_transactions_kb_transaction_id_uq unique (kb_transaction_id),
@@ -52,18 +54,31 @@ create index monobank_transactions_invoice_idx on monobank_transactions (invoice
 create unique index monobank_transactions_unresolved_charge_uq
     on monobank_transactions (kb_account_id)
     where transaction_type in ('AUTHORIZE', 'PURCHASE') and state in ('SENDING', 'UNKNOWN', 'REVIEW');
--- The same guard for refunds, per monobank invoice.
+-- Refunds of one invoice run one at a time: a second waits until the first is final (its amount counts only then).
 create unique index monobank_transactions_unresolved_refund_uq
     on monobank_transactions (invoice_id)
-    where transaction_type = 'REFUND' and state in ('SENDING', 'UNKNOWN', 'REVIEW');
+    where transaction_type = 'REFUND' and state in ('SENDING', 'PENDING', 'UNKNOWN', 'REVIEW');
+-- A hold is captured or voided once: one live CAPTURE or VOID per payment.
+create unique index monobank_transactions_capture_void_uq
+    on monobank_transactions (kb_payment_id)
+    where transaction_type in ('CAPTURE', 'VOID') and state not in ('FAILED', 'CANCELED');
+-- One Kill Bill invoice is paid through one charge at a time: a second waits until the first is final.
+create unique index monobank_transactions_open_invoice_charge_uq
+    on monobank_transactions (kb_invoice_id)
+    where kb_invoice_id is not null and transaction_type in ('AUTHORIZE', 'PURCHASE')
+        and state in ('SENDING', 'PENDING', 'UNKNOWN', 'REVIEW');
 -- The reconcile job's work queues: open rows by due time (next_check_at is always set while a row is open), and
 -- final rows Kill Bill has not been brought in line with yet.
 create index monobank_transactions_open_idx
     on monobank_transactions (next_check_at)
     where state in ('SENDING', 'PENDING', 'UNKNOWN');
 create index monobank_transactions_unsettled_idx
-    on monobank_transactions (record_id)
+    on monobank_transactions (next_settle_at nulls first, record_id)
     where state in ('SUCCESS', 'FAILED') and kb_settled_at is null;
+-- Rows waiting for an operator.
+create index monobank_transactions_review_idx
+    on monobank_transactions (record_id)
+    where state = 'REVIEW';
 
 create table monobank_payment_methods (
     record_id             bigserial primary key,

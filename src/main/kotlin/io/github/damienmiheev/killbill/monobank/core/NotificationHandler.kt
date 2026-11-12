@@ -11,6 +11,7 @@ import io.github.damienmiheev.killbill.monobank.db.NotificationDao
 import io.github.damienmiheev.killbill.monobank.db.PaymentMethodDao
 import io.github.damienmiheev.killbill.monobank.db.TransactionDao
 import io.github.damienmiheev.killbill.monobank.db.TxRow
+import io.github.damienmiheev.killbill.monobank.db.TxState
 import io.github.damienmiheev.killbill.monobank.mono.MonobankClients
 import io.github.damienmiheev.monobank.acquiring.invoice.InvoiceStatusResponse
 import io.github.damienmiheev.monobank.acquiring.webhook.VerificationResult
@@ -94,8 +95,11 @@ class NotificationHandler(
 
             VerificationResult.INVALID_SIGNATURE -> {
                 metrics.signatureFailed.incrementAndGet()
-                LOG.warn("Webhook for invoice {} failed signature verification; ignored", status.invoiceId)
-                return Result.IGNORED
+                // Not 200: a genuine webhook signed with a key monobank just rotated is sent again later, by when
+                // the SDK may fetch the new key (at most once a minute). The 401 does tell a prober that the
+                // invoice or reference is known here; references are random UUIDs and invoice ids are monobank's.
+                LOG.warn("Webhook for invoice {} failed signature verification; refused", status.invoiceId)
+                return Result.UNAUTHORIZED
             }
 
             VerificationResult.KEY_UNAVAILABLE -> {
@@ -106,6 +110,16 @@ class NotificationHandler(
                 return Result.RETRY_LATER
             }
         }
+        if (callInFlight(status, tenantId)) {
+            // The plugin's own call for this payment is still running. Applying now could settle a transaction Kill
+            // Bill has not stored yet (a `processing` webhook moves the row off SENDING, a `success` one then
+            // settles it), so monobank is asked to send it again; by then the call has answered.
+            LOG.info(
+                "Webhook for invoice {} arrived during the plugin's own call; monobank will retry",
+                status.invoiceId,
+            )
+            return Result.RETRY_LATER
+        }
         // Applying is idempotent and forward-only, so a redelivery is applied again rather than trusted to have
         // worked the first time; the notification is recorded only after the rows are updated.
         val applied = payments.apply(status, tenantId).toSettle
@@ -113,6 +127,8 @@ class NotificationHandler(
             transactions.findByInvoice(status.invoiceId).filter { row ->
                 row.tenantId == tenantId && settleable(row) && applied.none { it.recordId == row.recordId }
             }
+        // `applied` never holds a row that was still SENDING (its own call answers Kill Bill); the left-over rows
+        // are settled only once their call is surely over.
         (applied + leftOver).forEach(::settleQuietly)
         val fresh =
             notifications.record(
@@ -142,6 +158,20 @@ class NotificationHandler(
             return null
         }
         return paymentMethods.findBySourceInvoice(status.invoiceId).firstOrNull()?.tenantId
+    }
+
+    private fun callInFlight(
+        status: InvoiceStatusResponse,
+        tenantId: UUID,
+    ): Boolean {
+        val byReference =
+            status.reference
+                ?.let { runCatching { UUID.fromString(it) }.getOrNull() }
+                ?.let(transactions::findByReference)
+        return (transactions.findByInvoice(status.invoiceId) + listOfNotNull(byReference)).any {
+            it.tenantId == tenantId && it.state == TxState.SENDING &&
+                (it.attemptedAt ?: Instant.MIN).plus(inFlight()).isAfter(now())
+        }
     }
 
     /** Final, not yet settled, and not still inside its own synchronous call. */

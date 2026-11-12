@@ -180,19 +180,48 @@ class KillBillStack(
         auth: Boolean = true,
     ): Response = send(request(path, tenant, auth).GET())
 
+    /** POSTs as admin, as [user] (name to password), or with no credentials when [auth] is false. */
     fun post(
         path: String,
         body: String,
         contentType: String,
         tenant: TestTenant? = null,
+        auth: Boolean = true,
+        user: Pair<String, String>? = null,
     ): Response =
         send(
-            request(
-                path,
-                tenant,
-                auth = true,
-            ).header("Content-Type", contentType).POST(HttpRequest.BodyPublishers.ofString(body)),
+            request(path, tenant, auth, user)
+                .header("Content-Type", contentType)
+                .POST(HttpRequest.BodyPublishers.ofString(body)),
         )
+
+    fun put(
+        path: String,
+        tenant: TestTenant,
+    ): Response =
+        send(
+            request(path, tenant, auth = true)
+                .header("Content-Type", "application/json")
+                .PUT(HttpRequest.BodyPublishers.noBody()),
+        )
+
+    fun delete(
+        path: String,
+        tenant: TestTenant,
+    ): Response = send(request(path, tenant, auth = true).DELETE())
+
+    /** A Kill Bill user with exactly [permissions]; returns its name and password. */
+    fun createUser(permissions: List<String>): Pair<String, String> {
+        val name = "it-user-${UUID.randomUUID()}"
+        val role = JSON.writeValueAsString(mapOf("role" to "$name-role", "permissions" to permissions))
+        check(post("/1.0/kb/security/roles", role, "application/json").status == 201) { "role creation failed" }
+        val user =
+            JSON.writeValueAsString(
+                mapOf("username" to name, "password" to "pw-$name", "roles" to listOf("$name-role")),
+            )
+        check(post("/1.0/kb/security/users", user, "application/json").status == 201) { "user creation failed" }
+        return name to "pw-$name"
+    }
 
     /** The plugin's own Kill Bill user, with only `payment:transition` (design A7). */
     private fun createPluginUser() {
@@ -400,6 +429,7 @@ class KillBillStack(
         path: String,
         tenant: TestTenant?,
         auth: Boolean,
+        user: Pair<String, String>? = null,
     ): HttpRequest.Builder {
         val builder =
             HttpRequest
@@ -407,9 +437,10 @@ class KillBillStack(
                 .timeout(Duration.ofSeconds(30))
                 .header("X-Killbill-CreatedBy", "it")
         if (auth) {
+            val (name, password) = user ?: ("admin" to "password")
             builder.header(
                 "Authorization",
-                "Basic " + Base64.getEncoder().encodeToString("admin:password".toByteArray()),
+                "Basic " + Base64.getEncoder().encodeToString("$name:$password".toByteArray()),
             )
         }
         if (tenant !=

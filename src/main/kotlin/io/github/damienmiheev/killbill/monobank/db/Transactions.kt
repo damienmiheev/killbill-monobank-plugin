@@ -157,12 +157,9 @@ class TransactionDao(
                     ).single()
             Claim.Claimed(row)
         } catch (e: SQLException) {
-            when (Db.violatedConstraint(e)) {
-                null -> throw e
-                "monobank_transactions_kb_transaction_id_uq" -> Claim.Existing(findByTransaction(tx.transactionId)!!)
-                UNRESOLVED_CHARGE, UNRESOLVED_REFUND -> Claim.Unresolved
-                else -> throw e
-            }
+            // Locale-independent: a unique violation is either this transaction claimed meanwhile, or a guard index.
+            if (!Db.isUniqueViolation(e)) throw e
+            findByTransaction(tx.transactionId)?.let { Claim.Existing(it) } ?: Claim.Unresolved
         }
     }
 
@@ -184,8 +181,8 @@ class TransactionDao(
                 mono_status = coalesce(?, mono_status),
                 mono_modified_at = coalesce(?, mono_modified_at),
                 processed_amount_minor = coalesce(?, processed_amount_minor),
-                error_code = coalesce(?, error_code),
-                error_message = coalesce(?, error_message),
+                error_code = case when ? = 'SUCCESS' then null else coalesce(?, error_code) end,
+                error_message = case when ? = 'SUCCESS' then null else coalesce(?, error_message) end,
                 form_url = coalesce(?, form_url),
                 tds_url = coalesce(?, tds_url),
                 expires_at = coalesce(?, expires_at),
@@ -200,7 +197,9 @@ class TransactionDao(
             change.monoStatus,
             change.monoModifiedAt,
             change.processedAmountMinor,
+            change.state,
             change.errorCode?.take(MAX_TEXT),
+            change.state,
             change.errorMessage?.take(MAX_TEXT),
             change.formUrl,
             change.tdsUrl,
@@ -282,10 +281,41 @@ class TransactionDao(
     fun unsettled(limit: Int): List<TxRow> =
         db.query(
             "select * from monobank_transactions where state in ('SUCCESS', 'FAILED') and kb_settled_at is null " +
-                "order by record_id limit ?",
+                "and (next_settle_at is null or next_settle_at <= ?) " +
+                "order by next_settle_at nulls first, record_id limit ?",
+            now(),
             limit,
             map = ::mapRow,
         )
+
+    /** Leaves a row Kill Bill could not be brought in line with for later, so it does not block the queue. */
+    fun deferSettle(
+        recordId: Long,
+        until: Instant,
+    ) {
+        db.update("update monobank_transactions set next_settle_at = ? where record_id = ?", until, recordId)
+    }
+
+    fun review(limit: Int): List<TxRow> =
+        db.query(
+            "select * from monobank_transactions where state = 'REVIEW' order by record_id limit ?",
+            limit,
+            map = ::mapRow,
+        )
+
+    /** Holds that are neither captured nor voided and older than [olderThan] (monobank releases them at 9 days). */
+    fun holdsOlderThan(olderThan: Instant): Long =
+        db
+            .query(
+                """
+                select count(*) from monobank_transactions a
+                where a.transaction_type = 'AUTHORIZE' and a.state = 'SUCCESS' and coalesce(a.mono_modified_at, a.created_at) < ?
+                  and not exists (select 1 from monobank_transactions f where f.kb_payment_id = a.kb_payment_id
+                                  and f.transaction_type in ('CAPTURE', 'VOID') and f.state not in ('FAILED', 'CANCELED'))
+                """.trimIndent(),
+                olderThan,
+            ) { it.getLong(1) }
+            .single()
 
     fun countOpen(): Map<TxState, Long> =
         db
@@ -298,8 +328,6 @@ class TransactionDao(
 
     companion object {
         private const val MAX_TEXT = 2000
-        private const val UNRESOLVED_CHARGE = "monobank_transactions_unresolved_charge_uq"
-        private const val UNRESOLVED_REFUND = "monobank_transactions_unresolved_refund_uq"
 
         fun mapRow(rs: ResultSet): TxRow =
             TxRow(

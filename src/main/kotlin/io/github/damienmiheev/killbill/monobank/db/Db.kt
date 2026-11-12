@@ -117,19 +117,15 @@ class Db(
             }
         }
 
-        /** The name of the unique constraint or index that [e] violated, or null if it is not a unique violation. */
-        fun violatedConstraint(e: SQLException): String? {
+        /** Whether [e] or a chained exception is a unique violation, by SQLSTATE (locale-independent). */
+        fun isUniqueViolation(e: SQLException): Boolean {
             var current: SQLException? = e
             while (current != null) {
-                if (current.sqlState == UNIQUE_VIOLATION) {
-                    return CONSTRAINT.find(current.message.orEmpty())?.groupValues?.get(1) ?: ""
-                }
+                if (current.sqlState == UNIQUE_VIOLATION) return true
                 current = current.nextException
             }
-            return null
+            return false
         }
-
-        private val CONSTRAINT = Regex("constraint \"([a-z0-9_]+)\"")
 
         fun ResultSet.uuid(column: String): UUID? = getObject(column) as UUID?
 
