@@ -23,7 +23,7 @@ updates:
     ignore:
       - dependency-name: "org.kill-bill.*"
     # Not tracked: the Kill Bill and database images the integration tests boot (pom.xml killbill.image and
-    # killbill.db.image) move by hand with the Kill Bill version, and the actionlint docker:// step in ci.yml.
+    # killbill.db.image) move by hand with the Kill Bill version, and the actionlint image in ci.yml.
     groups:
       test:
         patterns:

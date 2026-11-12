@@ -87,10 +87,11 @@ jobs:
         with:
           persist-credentials: false
 
+      # A plain docker run, not a docker:// step: the repository allows only GitHub-owned and listed actions.
       - name: Lint workflows
-        uses: docker://rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 # bump by hand; Dependabot doesn't track docker:// steps
-        with:
-          args: -color
+        env:
+          ACTIONLINT: rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 # bump by hand
+        run: docker run --rm -v "$PWD:/repo" -w /repo "$ACTIONLINT" -color
 
   # New dependencies with known vulnerabilities or incompatible licences fail the PR. GitHub's Maven graph is static:
   # it sees the dependencies declared in pom.xml, not every transitive one or versions inherited from the parent.
