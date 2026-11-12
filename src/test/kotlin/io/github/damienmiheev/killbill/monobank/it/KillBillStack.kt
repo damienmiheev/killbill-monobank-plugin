@@ -472,7 +472,9 @@ class KillBillStack(
                         .lines()
                         .filter {
                             "monobank" in it || "\"level\":\"ERROR\"" in it
-                        }.joinToString("\n"),
+                        }.joinToString("\n")
+                        // a live token must never reach a file the live workflow uploads
+                        .let { log -> liveToken?.let { log.replace(it, "***") } ?: log },
                 )
             }
         }

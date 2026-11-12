@@ -89,19 +89,19 @@ class LivePayer(
                     .TypeOptions()
                     .setDelay(TYPE_DELAY_MS),
             )
-            shot("filled")
+            // No screenshot of the filled form: the card number must not be in an uploaded file.
             page.click(PAY)
             // After paying, monobank may show confirmation or information dialogs (test 3-D Secure, card saving,
             // service notices). Confirm each until the form is gone or the payment has settled.
             val deadline = System.nanoTime() + PAY_TIMEOUT_NANOS
-            while (System.nanoTime() < deadline) {
+            var done = false
+            while (!done && System.nanoTime() < deadline) {
                 page.waitForTimeout(STEP_WAIT_MS)
-                val clicked = dismissDialogs(page)
-                if (clicked) shot("dialog")
-                if (settled()) break
-                if (!clicked && !page.isVisible(CARD_NUMBER) && page.url() != pageUrl) break
+                if (dismissDialogs(page)) shot("dialog")
+                done = settled()
             }
-            shot("done")
+            shot(if (done) "done" else "timeout")
+            check(done) { "the $name page did not settle within ${PAY_TIMEOUT_NANOS / 1_000_000_000} s" }
         }
     }
 
@@ -109,12 +109,15 @@ class LivePayer(
     private fun dismissDialogs(page: Page): Boolean {
         var clicked = false
         for (selector in DIALOG_BUTTONS) clicked = clickIfVisible(page, selector) || clicked
-        for (text in CONFIRM_TEXTS) {
-            val button = page.locator("button:visible", Page.LocatorOptions().setHasText(text))
-            if (button.count() > 0 && !button.first().isDisabled) {
-                button.first().click()
-                clicked = true
-            }
+        // Only a button whose whole label is a confirmation: never "Continue without saving", "Do not confirm"...
+        val buttons = page.locator("button:visible", Page.LocatorOptions().setHasText(CONFIRM_LABEL))
+        for (i in 0 until buttons.count()) {
+            val button = buttons.nth(i)
+            val label = button.innerText().trim()
+            if (DENY.containsMatchIn(label) || button.isDisabled) continue
+            button.click()
+            clicked = true
+            break
         }
         return clicked
     }
@@ -142,9 +145,15 @@ class LivePayer(
         const val PAY = "#payWithCardButton"
         val DIALOG_BUTTONS = listOf("#service-provider-modal-btn", "#save-browser-info-modal-btn")
 
-        /** Buttons of confirmation dialogs, in English and Ukrainian. */
-        val CONFIRM_TEXTS =
-            listOf("Confirm", "Підтвердити", "Understand", "Зрозуміло", "Continue", "Продовжити", "Success", "Успішно")
+        /** A button whose whole label confirms, in English or Ukrainian. */
+        val CONFIRM_LABEL: java.util.regex.Pattern =
+            java.util.regex.Pattern.compile(
+                "^\\s*(Confirm|Підтвердити|Understand|Зрозуміло|Continue|Продовжити|Success|Успішно|OK)\\s*$",
+                java.util.regex.Pattern.CASE_INSENSITIVE,
+            )
+
+        /** Never clicked, whatever else the label says. */
+        val DENY = Regex("without|cancel|decline|fail|не |без |скасув|відмов|відхил", RegexOption.IGNORE_CASE)
 
         private const val TYPE_DELAY_MS = 40.0
         private const val STEP_WAIT_MS = 1500.0

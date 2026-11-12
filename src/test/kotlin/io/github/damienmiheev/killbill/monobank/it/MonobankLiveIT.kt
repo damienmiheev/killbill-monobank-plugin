@@ -247,6 +247,10 @@ class MonobankLiveIT {
     ) {
         val card = awaitCardSettled(pm)
         report("card", card)
+        // In the pipeline a card that was not saved is a failure, never a silent skip of everything below.
+        if (System.getenv("MONOBANK_LIVE_PAY") == "auto") {
+            assertThat(card).describedAs("card saved by the purchase page").isEqualTo("ACTIVE")
+        }
         assumeTrue(card == "ACTIVE", "monobank did not save the card on this test merchant ($card)")
 
         val renewal = stack.pay(tenant, account, pm, "PURCHASE", "1.00")
@@ -300,7 +304,7 @@ class MonobankLiveIT {
             "$currency saved-card hold",
             "${hold.status()} ${tx.path("gatewayErrorCode").asText()} ${tx.path("gatewayErrorMsg").asText()}",
         )
-        if (hold.status() == "SUCCESS") stack.followUp(tenant, paymentId(hold), "VOID")
+        if (hold.status() == "SUCCESS" || hold.status() == "PENDING") stack.followUp(tenant, paymentId(hold), "VOID")
     }
 
     private fun JsonNode.lastTx(): JsonNode = path("transactions").last()

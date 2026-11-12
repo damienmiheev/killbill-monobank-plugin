@@ -28,6 +28,7 @@ class LivePayerIT {
     private lateinit var server: HttpServer
     private val submitted = CopyOnWriteArrayList<Map<String, String>>()
     private val confirmed = CopyOnWriteArrayList<String>()
+    private val declined = CopyOnWriteArrayList<String>()
 
     @BeforeAll
     fun start() {
@@ -52,6 +53,11 @@ class LivePayerIT {
             confirmed += "yes"
             ex.responseHeaders.add("Location", "/done")
             ex.sendResponseHeaders(303, -1)
+            ex.close()
+        }
+        server.createContext("/decoy") { ex ->
+            declined += "clicked"
+            ex.sendResponseHeaders(204, -1)
             ex.close()
         }
         server.createContext("/done") { ex ->
@@ -79,6 +85,7 @@ class LivePayerIT {
             .containsEntry("exp", "12/30")
             .containsEntry("cvc", "123")
         assertThat(confirmed).hasSize(1)
+        assertThat(declined).describedAs("a button that declines or skips must never be clicked").isEmpty()
         assertThat(Files.list(shots).use { it.count() }).isGreaterThanOrEqualTo(3)
     }
 
@@ -98,6 +105,8 @@ class LivePayerIT {
               <button id="payWithCardButton" type="submit" onclick="pay()">Pay 1 ₴</button>
             </form>
             <div id="confirm" style="display:none"><p>Confirm the payment</p>
+              <button onclick="fetch('/decoy')">Continue without saving card</button>
+              <button onclick="fetch('/decoy')">Do not confirm</button>
               <button onclick="location.href='/confirm'">Confirm</button></div>
             <script>
             function pay(){

@@ -5,9 +5,11 @@ name: Live
 # suite settles, captures, voids and refunds. Never on pull requests: the token lives in the protected environment
 # `monobank-test`, which only this workflow on `main` can use, so code from a fork never sees it.
 #
-# Setup (once, by the owner): environment `monobank-test` limited to the `main` branch, with
-#   secret   MONOBANK_ACQUIRING_TEST_TOKEN  a monobank acquiring TEST token (never a production one)
-#   variable MONOBANK_TEST_CARD             number|MM/YY|CVC of a test card, e.g. a published Luhn-valid test number
+# Setup (once, by the owner): environment `monobank-test` limited to the `main` branch, with two secrets
+#   MONOBANK_ACQUIRING_TEST_TOKEN  a monobank acquiring TEST token (never a production one)
+#   MONOBANK_TEST_CARD             number|MM/YY|CVC of a made-up Luhn-valid test card, never a real card
+# Both are secrets so they are masked in the log. Uploads: screenshots (no filled card form) always; Kill Bill's logs
+# and test reports only when the run fails, and only after checking the token is in none of them.
 
 on:
   workflow_dispatch:
@@ -43,10 +45,10 @@ jobs:
       - name: Credentials are configured
         env:
           TOKEN: ${{ secrets.MONOBANK_ACQUIRING_TEST_TOKEN }}
-          CARD: ${{ vars.MONOBANK_TEST_CARD }}
+          CARD: ${{ secrets.MONOBANK_TEST_CARD }}
         run: |
           if [ -z "$TOKEN" ] || [ -z "$CARD" ]; then
-            echo "::error::Set secret MONOBANK_ACQUIRING_TEST_TOKEN and variable MONOBANK_TEST_CARD in environment monobank-test"
+            echo "::error::Set secrets MONOBANK_ACQUIRING_TEST_TOKEN and MONOBANK_TEST_CARD in environment monobank-test"
             exit 1
           fi
 
@@ -67,19 +69,44 @@ jobs:
           MONOBANK_ACQUIRING_TEST_TOKEN: ${{ secrets.MONOBANK_ACQUIRING_TEST_TOKEN }}
           MONOBANK_TOKEN_IS_TEST: "1"
           MONOBANK_LIVE_PAY: auto
-          MONOBANK_TEST_CARD: ${{ vars.MONOBANK_TEST_CARD }}
+          MONOBANK_TEST_CARD: ${{ secrets.MONOBANK_TEST_CARD }}
         run: >-
           ./mvnw -B -ntp -Plive verify -Dtest=NoSuchTest -Dsurefire.failIfNoSpecifiedTests=false
           -Dit.test=LivePayerIT,MonobankLiveIT
 
-      - name: Screenshots and reports
+      - name: Screenshots
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: live
+          name: live-screenshots
           path: |
             target/live-screenshots/
             target/live-payer-it/
+          retention-days: 14
+
+      # The repository is public, and so are its artifacts: logs are uploaded only on failure and only when neither
+      # the token nor the card number is in any of them.
+      - name: Logs are free of secrets
+        id: clean
+        if: failure()
+        env:
+          TOKEN: ${{ secrets.MONOBANK_ACQUIRING_TEST_TOKEN }}
+          CARD: ${{ secrets.MONOBANK_TEST_CARD }}
+        run: |
+          number="${CARD%%|*}"
+          if grep -rqF -e "$TOKEN" -e "$number" target/failsafe-reports target/killbill-*.log target/live-screenshots 2>/dev/null; then
+            echo "::error::A secret is in the logs; they are not uploaded"
+            echo "clean=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "clean=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Logs
+        if: failure() && steps.clean.outputs.clean == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: live-logs
+          path: |
             target/failsafe-reports/
             target/killbill-*.log
-          retention-days: 14
+          retention-days: 7
