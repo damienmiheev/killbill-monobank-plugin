@@ -1,0 +1,470 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Copyright 2026 Dmytro Mikhieiev
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!-- Kill Bill's parent pins every Kill Bill dependency to the versions Kill Bill 0.24.22 ships. -->
+    <parent>
+        <groupId>org.kill-bill.billing</groupId>
+        <artifactId>killbill-oss-parent</artifactId>
+        <version>0.146.87</version>
+    </parent>
+
+    <groupId>io.github.damienmiheev</groupId>
+    <artifactId>killbill-monobank-plugin</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <packaging>bundle</packaging>
+
+    <name>Kill Bill monobank plugin</name>
+    <description>Kill Bill payment plugin for monobank internet acquiring (Ukraine)</description>
+    <url>https://github.com/damienmiheev/killbill-monobank-plugin</url>
+    <inceptionYear>2026</inceptionYear>
+
+    <licenses>
+        <license>
+            <name>Apache License, Version 2.0</name>
+            <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
+    <developers>
+        <developer>
+            <id>damienmiheev</id>
+            <name>Dmytro Mikhieiev</name>
+            <url>https://github.com/damienmiheev</url>
+        </developer>
+    </developers>
+
+    <scm>
+        <connection>scm:git:https://github.com/damienmiheev/killbill-monobank-plugin.git</connection>
+        <developerConnection>scm:git:git@github.com:damienmiheev/killbill-monobank-plugin.git</developerConnection>
+        <tag>HEAD</tag>
+        <url>https://github.com/damienmiheev/killbill-monobank-plugin</url>
+    </scm>
+
+    <issueManagement>
+        <system>GitHub</system>
+        <url>https://github.com/damienmiheev/killbill-monobank-plugin/issues</url>
+    </issueManagement>
+
+    <properties>
+        <!-- The pom is sorted by Kill Bill's parent (sortpom, on verify): comments live inside the elements. -->
+        <assertj.version>3.27.7</assertj.version>
+        <check.skip-dependency>
+            true
+            <!-- dependency:analyze does not understand Kotlin; see CONTRIBUTING -->
+        </check.skip-dependency>
+        <check.skip-dependency-scope>true</check.skip-dependency-scope>
+        <check.skip-dependency-versions>true</check.skip-dependency-versions>
+        <check.skip-duplicate-finder>
+            true
+            <!-- the inlined Kotlin stdlib and Jackson carry overlapping annotation classes -->
+        </check.skip-duplicate-finder>
+        <check.skip-enforcer>false</check.skip-enforcer>
+        <check.skip-rat>
+            true
+            <!-- sources carry SPDX headers, which rat does not read -->
+        </check.skip-rat>
+        <check.skip-spotbugs>
+            true
+            <!-- Kotlin is checked by the compiler (warnings are errors), ktlint and detekt -->
+        </check.skip-spotbugs>
+        <detekt.version>
+            2.0.0-alpha.6
+            <!-- the only detekt line that analyses Kotlin 2.4 -->
+        </detekt.version>
+        <exec-maven-plugin.version>3.7.0</exec-maven-plugin.version>
+        <jackson-databind.version>
+            2.23.0
+            <!-- embedded privately: need not match Kill Bill's copy -->
+        </jackson-databind.version>
+        <jackson.version>2.23.0</jackson.version>
+        <junit.version>6.1.3</junit.version>
+        <killbill.db.image>
+            killbill/postgresql:0.24
+            <!-- the database image the integration tests boot -->
+        </killbill.db.image>
+        <killbill.image>
+            killbill/killbill:0.24.22
+            <!-- the Kill Bill image the integration tests boot -->
+        </killbill.image>
+        <kotlin.compiler.apiVersion>2.4</kotlin.compiler.apiVersion>
+        <kotlin.compiler.jvmTarget>
+            11
+            <!-- the Kill Bill 0.24 image runs Java 11 -->
+        </kotlin.compiler.jvmTarget>
+        <kotlin.compiler.languageVersion>2.4</kotlin.compiler.languageVersion>
+        <kotlin.version>2.4.21</kotlin.version>
+        <ktlint-maven-plugin.version>3.7.1</ktlint-maven-plugin.version>
+        <maven-bundle-plugin.version>6.2.0</maven-bundle-plugin.version>
+        <maven-dependency-plugin.version>3.11.0</maven-dependency-plugin.version>
+        <maven.compiler.release>11</maven.compiler.release>
+        <osgi.extra-import>org.osgi.framework;version="[1.8,2)",!kotlin.*,!com.fasterxml.*,!org.jetbrains.annotations.*,!org.intellij.lang.annotations.*</osgi.extra-import>
+        <osgi.private>
+            io.github.damienmiheev.killbill.monobank.*
+            <!-- the plugin and everything embedded stay private -->
+        </osgi.private>
+        <postgresql.version>42.7.14</postgresql.version>
+        <project.build.targetJdk>11</project.build.targetJdk>
+        <slf4j-simple.version>2.0.20</slf4j-simple.version>
+        <surefire.version>3.6.1</surefire.version>
+        <testcontainers.version>2.0.5</testcontainers.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- Jackson is embedded privately in the bundle, so it need not match Kill Bill's own copy. -->
+            <dependency>
+                <groupId>com.fasterxml.jackson.core</groupId>
+                <artifactId>jackson-annotations</artifactId>
+                <version>2.23</version>
+            </dependency>
+            <dependency>
+                <groupId>com.fasterxml.jackson.core</groupId>
+                <artifactId>jackson-core</artifactId>
+                <version>${jackson.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.fasterxml.jackson.core</groupId>
+                <artifactId>jackson-databind</artifactId>
+                <version>${jackson-databind.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <!-- Embedded in the bundle, like kotlin-stdlib; everything provided comes from Kill Bill at runtime. -->
+        </dependency>
+        <dependency>
+            <groupId>jakarta.servlet</groupId>
+            <artifactId>jakarta.servlet-api</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>joda-time</groupId>
+            <artifactId>joda-time</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <!-- Testcontainers needs a current one; Kill Bill's parent pins an old version. -->
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-compress</artifactId>
+            <version>1.28.0</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- Testcontainers needs it; Kill Bill's parent leaves it out of the test classpath. -->
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-lang3</artifactId>
+            <version>3.22.0</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.felix</groupId>
+            <artifactId>org.apache.felix.framework</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <version>${assertj.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.jetbrains.kotlin</groupId>
+            <artifactId>kotlin-stdlib</artifactId>
+            <version>${kotlin.version}</version>
+            <exclusions>
+                <exclusion>
+                    <!-- Compile-time annotations only; keeps them out of the bundle. -->
+                    <groupId>org.jetbrains</groupId>
+                    <artifactId>annotations</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.kill-bill.billing</groupId>
+            <artifactId>killbill-api</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.kill-bill.billing</groupId>
+            <artifactId>killbill-platform-osgi-api</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.kill-bill.billing</groupId>
+            <artifactId>killbill-platform-osgi-bundles-lib-killbill</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.kill-bill.billing.plugin</groupId>
+            <artifactId>killbill-plugin-api-notification</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.kill-bill.billing.plugin</groupId>
+            <artifactId>killbill-plugin-api-payment</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.kill-bill.commons</groupId>
+            <artifactId>killbill-clock</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>${postgresql.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <version>${slf4j-simple.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-junit-jupiter</artifactId>
+            <version>${testcontainers.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-postgresql</artifactId>
+            <version>${testcontainers.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+            </resource>
+            <!-- The bundle carries the project's own licence and notice (which credits what is embedded). -->
+            <resource>
+                <targetPath>META-INF</targetPath>
+                <directory>${project.basedir}</directory>
+                <includes>
+                    <include>LICENSE</include>
+                    <include>NOTICE</include>
+                </includes>
+            </resource>
+        </resources>
+
+        <plugins>
+
+            <plugin>
+                <groupId>com.github.gantsign.maven</groupId>
+                <artifactId>ktlint-maven-plugin</artifactId>
+                <version>${ktlint-maven-plugin.version}</version>
+                <executions>
+                    <execution>
+                        <id>ktlint</id>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                        <phase>validate</phase>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.felix</groupId>
+                <artifactId>maven-bundle-plugin</artifactId>
+                <version>${maven-bundle-plugin.version}</version>
+            </plugin>
+
+            <plugin>
+                <!-- The parent's rules apply (Maven, Java, banned dependencies); only the bundle must be Java 11 bytecode. -->
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <configuration>
+                    <rules>
+                        <enforceBytecodeVersion>
+                            <ignoredScopes>
+                                <ignoredScope>test</ignoredScope>
+                                <ignoredScope>provided</ignoredScope>
+                            </ignoredScopes>
+                        </enforceBytecodeVersion>
+                    </rules>
+                </configuration>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${surefire.version}</version>
+                <configuration>
+                    <!-- The integration tests boot Kill Bill with the packaged bundle. -->
+                    <classesDirectory>${project.build.outputDirectory}</classesDirectory>
+                    <argLine>-Xmx512m -Duser.timezone=UTC</argLine>
+                    <systemPropertyVariables>
+                        <plugin.bundle>${project.build.directory}/${project.build.finalName}.jar</plugin.bundle>
+                        <plugin.version>${project.version}</plugin.version>
+                        <plugin.ddl>${project.basedir}/src/main/resources/ddl-postgresql.sql</plugin.ddl>
+                        <killbill.image>${killbill.image}</killbill.image>
+                        <killbill.db.image>${killbill.db.image}</killbill.db.image>
+                    </systemPropertyVariables>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>${surefire.version}</version>
+                <configuration>
+                    <!-- Unit tests only; *IT classes run in the integration-test phase. -->
+                    <excludes>
+                        <exclude>**/*IT.class</exclude>
+                    </excludes>
+                    <argLine>-Xmx512m -Duser.timezone=UTC</argLine>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.jetbrains.kotlin</groupId>
+                <artifactId>kotlin-maven-plugin</artifactId>
+                <version>${kotlin.version}</version>
+                <configuration>
+                    <jvmTarget>${kotlin.compiler.jvmTarget}</jvmTarget>
+                    <args>
+                        <arg>-Werror</arg>
+                        <arg>-Xjsr305=strict</arg>
+                        <arg>-Xjdk-release=11</arg>
+                    </args>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>compile</id>
+                        <goals>
+                            <goal>compile</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>test-compile</id>
+                        <goals>
+                            <goal>test-compile</goal>
+                        </goals>
+                        <configuration>
+                            <!-- Tests run on a current JDK (JUnit 6 needs 17+); only the bundle must be Java 11. -->
+                            <jvmTarget>21</jvmTarget>
+                            <args>
+                                <arg>-Werror</arg>
+                                <arg>-Xjsr305=strict</arg>
+                            </args>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+        <sourceDirectory>src/main/kotlin</sourceDirectory>
+        <testSourceDirectory>src/test/kotlin</testSourceDirectory>
+    </build>
+
+    <profiles>
+        <!-- detekt 2 has no Maven plugin: run its CLI (mvn -Pdetekt verify, used by CI). -->
+        <profile>
+            <id>detekt</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-dependency-plugin</artifactId>
+                        <version>${maven-dependency-plugin.version}</version>
+                        <executions>
+                            <execution>
+                                <id>fetch-detekt</id>
+                                <goals>
+                                    <goal>copy</goal>
+                                </goals>
+                                <phase>validate</phase>
+                                <configuration>
+                                    <!-- The parent skips the dependency plugin through check.skip-dependency. -->
+                                    <skip>false</skip>
+                                    <artifactItems>
+                                        <artifactItem>
+                                            <groupId>dev.detekt</groupId>
+                                            <artifactId>detekt-cli</artifactId>
+                                            <version>${detekt.version}</version>
+                                            <classifier>all</classifier>
+                                            <destFileName>detekt-cli.jar</destFileName>
+                                        </artifactItem>
+                                    </artifactItems>
+                                    <outputDirectory>${project.build.directory}/detekt</outputDirectory>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <version>${exec-maven-plugin.version}</version>
+                        <executions>
+                            <execution>
+                                <id>detekt</id>
+                                <goals>
+                                    <goal>exec</goal>
+                                </goals>
+                                <phase>verify</phase>
+                                <configuration>
+                                    <executable>java</executable>
+                                    <arguments>
+                                        <argument>-jar</argument>
+                                        <argument>${project.build.directory}/detekt/detekt-cli.jar</argument>
+                                        <argument>--input</argument>
+                                        <argument>${project.basedir}/src/main/kotlin:${project.basedir}/src/test/kotlin</argument>
+                                        <argument>--config</argument>
+                                        <argument>${project.basedir}/detekt.yml</argument>
+                                        <argument>--build-upon-default-config</argument>
+                                        <argument>--jvm-target</argument>
+                                        <argument>11</argument>
+                                    </arguments>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+</project>

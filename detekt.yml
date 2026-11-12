@@ -1,0 +1,29 @@
+config:
+  validation: true
+  warningsAsErrors: true
+
+complexity:
+  LongMethod:
+    allowedLines: 60
+  LongParameterList:
+    # Kill Bill's PaymentPluginApi fixes the parameter lists of its operations.
+    active: false
+  TooManyFunctions:
+    # One method per Kill Bill operation.
+    allowedFunctionsPerClass: 30
+    allowedFunctionsPerFile: 30
+
+style:
+  MaxLineLength:
+    maxLineLength: 120
+  WildcardImport:
+    active: true
+  MagicNumber:
+    active: false
+  ReturnCount:
+    max: 4
+
+exceptions:
+  TooGenericExceptionCaught:
+    # Deliberate at the plugin's boundaries (activator start, health, Kill Bill reads): every one is commented.
+    active: false

@@ -1,0 +1,43 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "CI"
+
+  # Kill Bill's own artifacts are fixed by the Kill Bill version the plugin supports (the 0.24 line):
+  # they move by hand together with the Kill Bill image the tests boot.
+  - package-ecosystem: maven
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    ignore:
+      - dependency-name: "org.kill-bill.*"
+    # Not tracked: the Kill Bill and database images the integration tests boot (pom.xml killbill.image and
+    # killbill.db.image) move by hand with the Kill Bill version, and the actionlint image in ci.yml.
+    groups:
+      test:
+        patterns:
+          - "org.junit*"
+          - "org.assertj*"
+          - "org.testcontainers*"
+          - "org.postgresql*"
+          - "org.apache.commons*"
+          - "org.slf4j*"
+      kotlin:
+        patterns: ["org.jetbrains.kotlin*"]
+      jackson:
+        patterns: ["com.fasterxml.jackson*"]
+      build:
+        patterns: ["*"]
+    commit-message:
+      prefix: "Deps"
