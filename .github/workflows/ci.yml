@@ -28,7 +28,7 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
           # Files no check, build or package reads. LICENSE and NOTICE are not here: they go into the bundle.
-          DOCS: '^(README|AGENTS|CLAUDE|CHANGELOG|CONTRIBUTING|SECURITY|CODE_OF_CONDUCT)\.md$|^docs/[^/]+\.md$|^\.github/(dependabot\.yml|rulesets/[^/]+\.json|pull_request_template\.md|CODEOWNERS|ISSUE_TEMPLATE/.+)$'
+          DOCS: '^(README|AGENTS|CLAUDE|CHANGELOG|CONTRIBUTING|SECURITY|CODE_OF_CONDUCT|RELEASING)\.md$|^docs/[^/]+\.md$|^\.github/(dependabot\.yml|rulesets/[^/]+\.json|pull_request_template\.md|CODEOWNERS|ISSUE_TEMPLATE/.+)$'
         run: |
           code=true
           if [ -n "$PR" ]; then
