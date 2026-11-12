@@ -1,5 +1,5 @@
 {
-  "name": "release-tags",
+  "name": "release-tags-immutable",
   "target": "tag",
   "enforcement": "active",
   "conditions": {
@@ -13,13 +13,16 @@
   "bypass_actors": [],
   "rules": [
     {
-      "type": "deletion"
-    },
-    {
       "type": "update"
     },
     {
+      "type": "deletion"
+    },
+    {
       "type": "non_fast_forward"
+    },
+    {
+      "type": "required_signatures"
     }
   ]
 }
