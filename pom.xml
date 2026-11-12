@@ -26,7 +26,7 @@
 
     <groupId>io.github.damienmiheev</groupId>
     <artifactId>killbill-monobank-plugin</artifactId>
-    <version>0.1.0</version>
+    <version>0.1.1</version>
     <packaging>bundle</packaging>
 
     <name>Kill Bill monobank plugin</name>
@@ -460,6 +460,19 @@
             <id>sonatype-oss-release</id>
             <build>
                 <plugins>
+                    <plugin>
+                        <!--
+                        Signs inside Maven (Bouncy Castle) with the key and passphrase from MAVEN_GPG_KEY and
+                        MAVEN_GPG_PASSPHRASE: no gpg program, no pinentry. The parent's 3.1.0 ran gpg, which failed in
+                        the Publish workflow with "No pinentry".
+                        -->
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-gpg-plugin</artifactId>
+                        <version>3.2.7</version>
+                        <configuration>
+                            <signer>bc</signer>
+                        </configuration>
+                    </plugin>
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-jar-plugin</artifactId>
