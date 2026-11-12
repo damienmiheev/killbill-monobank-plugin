@@ -4,7 +4,7 @@
 set -euo pipefail
 
 SDK_REPO="https://github.com/damienmiheev/monobank-kotlin-sdk.git"
-SDK_COMMIT="cbc8f94f4997a6ff92dedbcb876fee4692d00ffe"
+SDK_COMMIT="7238fed31a45315b32ed5522461f903f23e56849"
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
