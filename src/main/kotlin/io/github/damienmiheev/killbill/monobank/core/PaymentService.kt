@@ -753,10 +753,18 @@ class PaymentService(
                         "monobank refused the merchant token (403): check the tenant's settings",
                     )
                 }
+                // monobank settles a partial capture for a while ("processing"); a refund in that window is refused
+                // with 1004 "order not finished" and nothing is refunded: CANCELED, so the caller simply retries.
+                val settling = code == ORDER_NOT_FINISHED
                 TxChange(
                     if (decline) TxState.FAILED else TxState.CANCELED,
-                    errorCode = code,
-                    errorMessage = api?.errorText ?: e.message,
+                    errorCode = if (settling) CAPTURE_SETTLING else code,
+                    errorMessage =
+                        if (settling) {
+                            "monobank is still settling the capture; nothing was refunded, try again in a minute"
+                        } else {
+                            api?.errorText ?: e.message
+                        },
                     settled = true,
                 )
             }
@@ -1094,6 +1102,8 @@ class PaymentService(
         const val NEEDS_REVIEW = "NEEDS_REVIEW"
         const val INVALID_BASKET = "INVALID_BASKET"
         const val CANCELED_BY_MERCHANT = "CANCELED_BY_MERCHANT"
+        const val CAPTURE_SETTLING = "CAPTURE_SETTLING"
+        private const val ORDER_NOT_FINISHED = "1004"
 
         /** Below Kill Bill's 30 s plugin call, with room to store the answer. */
         private val ANSWER_BUDGET: Duration = Duration.ofSeconds(28)

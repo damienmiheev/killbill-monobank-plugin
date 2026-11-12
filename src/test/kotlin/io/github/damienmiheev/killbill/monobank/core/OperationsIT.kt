@@ -118,6 +118,12 @@ class OperationsIT : ServiceHarness() {
         assertThat(refusalCode(payments.refund(usdRefund))).isEqualTo(PaymentService.INVALID_OPERATION)
         assertThat(refusalCode(payments.refund(op(TransactionType.REFUND, account, payment, pm, "6.01"))))
             .isEqualTo(PaymentService.INVALID_OPERATION)
+        // monobank is still settling the partial capture: it refuses the refund (1004), nothing is refunded and the
+        // refused row does not block the retry
+        val early = stored(payments.refund(op(TransactionType.REFUND, account, payment, pm, "6.00")))
+        assertThat(early.state).isEqualTo(TxState.CANCELED)
+        assertThat(early.errorCode).isEqualTo(PaymentService.CAPTURE_SETTLING)
+        fake.settleFinalize(captured.invoiceId!!)
         val refund = stored(payments.refund(op(TransactionType.REFUND, account, payment, pm, "6.00")))
         assertThat(awaitRow(refund) { it.state.isFinal }.state).isEqualTo(TxState.SUCCESS)
         val cancel = fake.requests().last { it.path == MonobankPaths.INVOICE_CANCEL }.body
