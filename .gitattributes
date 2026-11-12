@@ -1,3 +1,4 @@
 * text=auto eol=lf
-*.cmd text eol=crlf
+# Windows scripts are stored as they are (CRLF), the way Dependabot writes the Maven wrapper.
+*.cmd -text
 *.jar binary
