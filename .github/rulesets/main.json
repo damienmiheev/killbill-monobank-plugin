@@ -22,6 +22,9 @@
       "type": "required_linear_history"
     },
     {
+      "type": "required_signatures"
+    },
+    {
       "type": "pull_request",
       "parameters": {
         "required_approving_review_count": 0,

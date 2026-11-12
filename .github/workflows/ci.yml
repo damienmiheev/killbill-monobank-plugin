@@ -87,6 +87,13 @@ jobs:
         with:
           persist-credentials: false
 
+      # Push rulesets exist only for organisation repositories, so the same limits are checked here.
+      - name: No binaries, keys or large files
+        run: |
+          bad=$(git ls-files | grep -iE '\.(jar|zip|tar|gz|class|p12|pfx|jks|pem|key|env)$' || true)
+          big=$(git ls-files -z | xargs -0 -I{} find {} -maxdepth 0 -type f -size +5M)
+          if [ -n "$bad$big" ]; then printf 'Not allowed in the repository:\n%s\n%s\n' "$bad" "$big"; exit 1; fi
+
       # A plain docker run, not a docker:// step: the repository allows only GitHub-owned and listed actions.
       - name: Lint workflows
         env:
