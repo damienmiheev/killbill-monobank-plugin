@@ -40,6 +40,7 @@ object SchemaCheck {
                     "tds_url",
                     "expires_at",
                     "save_card",
+                    "basket",
                     "attempted_at",
                     "next_check_at",
                     "next_settle_at",
