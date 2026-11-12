@@ -108,7 +108,7 @@ jobs:
           fail-on-severity: moderate
           allow-licenses: >-
             Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, EPL-1.0, EPL-2.0, CDDL-1.0, CDDL-1.1, ISC, MPL-2.0,
-            EDL-1.0, BlueOak-1.0.0, CC0-1.0, Unlicense, PostgreSQL, LGPL-2.1-or-later, GPL-2.0-with-classpath-exception
+            BlueOak-1.0.0, CC0-1.0, Unlicense, PostgreSQL, LGPL-2.1-or-later
 
   # The one required status check (.github/rulesets/main.json). Jobs skipped for a docs-only PR count as passed.
   check:
