@@ -115,10 +115,7 @@
         <maven-bundle-plugin.version>6.2.0</maven-bundle-plugin.version>
         <maven-dependency-plugin.version>3.11.0</maven-dependency-plugin.version>
         <maven.compiler.release>11</maven.compiler.release>
-        <monobank-sdk.version>
-            1.0.0-SNAPSHOT
-            <!-- pinned commit until 1.0.0 is on Maven Central: see CI -->
-        </monobank-sdk.version>
+        <monobank-sdk.version>1.0.0</monobank-sdk.version>
         <osgi.extra-import>org.osgi.framework;version="[1.8,2)",!kotlin.*,!com.fasterxml.*,!org.jetbrains.annotations.*,!org.intellij.lang.annotations.*</osgi.extra-import>
         <osgi.private>
             io.github.damienmiheev.killbill.monobank.*

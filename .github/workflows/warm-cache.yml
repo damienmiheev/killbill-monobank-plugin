@@ -39,8 +39,5 @@ jobs:
           java-version: "21"
           cache: maven
 
-
-      - name: Install the monobank SDK (pinned commit, until it is on Maven Central)
-        run: scripts/install-monobank-sdk.sh
       - name: Resolve and build without tests
         run: ./mvnw -B -ntp -Pdetekt -DskipTests -DskipITs verify

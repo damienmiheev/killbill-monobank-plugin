@@ -52,9 +52,6 @@ jobs:
             exit 1
           fi
 
-      - name: Install the monobank SDK (pinned commit, until it is on Maven Central)
-        run: scripts/install-monobank-sdk.sh
-
       - name: Build the bundle
         run: ./mvnw -B -ntp -DskipTests -DskipITs install
 
