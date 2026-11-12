@@ -143,6 +143,8 @@ class PaymentService(
         val money: Money,
         val destination: String,
         val basket: List<BasketItem>?,
+        /** The plugin's own one-unit item, not the caller's basketOrder. */
+        val defaultBasket: Boolean,
         val hosted: Boolean,
         val card: PmRow?,
     ) : ChargeCheck {
@@ -160,7 +162,7 @@ class PaymentService(
                 amountMinor = money.minor,
                 currency = money.currency.currencyCode,
                 saveCard = hosted && op.properties.flag(Properties.SAVE_CARD),
-                basket = Baskets.toJson(basket),
+                basket = Baskets.toJson(basket, isDefault = defaultBasket),
             )
     }
 
@@ -179,10 +181,10 @@ class PaymentService(
             return ChargeRefusal(refused(op, INVALID_AMOUNT, "monobank holds payment pages only in UAH"))
         }
         val destination = op.properties.string(Properties.DESTINATION) ?: settings.destination ?: DEFAULT_DESTINATION
+        val callerBasket = op.properties.string(Properties.BASKET_ORDER)
         val basket =
             try {
-                Baskets.fromProperty(op.properties.string(Properties.BASKET_ORDER), money.minor)
-                    ?: Baskets.single(settings, destination, money.minor)
+                Baskets.fromProperty(callerBasket, money.minor) ?: Baskets.single(settings, destination, money.minor)
             } catch (e: IllegalArgumentException) {
                 return ChargeRefusal(refused(op, INVALID_BASKET, e.message ?: "invalid basketOrder"))
             }
@@ -199,7 +201,7 @@ class PaymentService(
                 refused(op, NO_ACTIVE_CARD, "the payment method has no saved card; use hosted=true", decline = true),
             )
         }
-        return ChargePlan(settings, money, destination, basket, hosted, card)
+        return ChargePlan(settings, money, destination, basket, callerBasket == null, hosted, card)
     }
 
     private fun createHosted(
@@ -384,6 +386,8 @@ class PaymentService(
         class Send(
             val money: Money,
             val invoiceId: String,
+            /** The receipt items sent, stored on the row so a refund after a capture can repeat them. */
+            val basket: String? = null,
             val call: (TxRow, MonobankAcquiring) -> TxChange,
         ) : FollowUp
     }
@@ -419,14 +423,12 @@ class PaymentService(
                     is ItemsCheck.Invalid -> return@followUp FollowUp.Refuse(INVALID_BASKET, checked.reason)
                     is ItemsCheck.Valid -> checked.items
                 }
-            FollowUp.Send(money, auth!!.invoiceId!!) { _, client ->
+            FollowUp.Send(money, auth!!.invoiceId!!, Baskets.storedFor(items, auth.basket)) { _, client ->
                 val response =
                     client.invoices.finalize(
                         FinalizeInvoiceRequest
-                            .builder(
-                                auth.invoiceId,
-                                money.minor,
-                            ).items(items.ifEmpty { null })
+                            .builder(auth.invoiceId, money.minor)
+                            .items(items?.let(Baskets::fiscal))
                             .build(),
                     )
                 operationChange(response.status, response.statusRaw, money.minor)
@@ -481,11 +483,12 @@ class PaymentService(
                 }
             if (refusal != null) return@followUp FollowUp.Refuse(INVALID_OPERATION, refusal)
             val items =
-                when (val checked = operationItems(op, chargeBasket(rows), money)) {
+                // the basket of the charge that took the money: the purchase, or the capture of a hold
+                when (val checked = operationItems(op, charge?.basket, money)) {
                     is ItemsCheck.Invalid -> return@followUp FollowUp.Refuse(INVALID_BASKET, checked.reason)
                     is ItemsCheck.Valid -> checked.items
                 }
-            FollowUp.Send(money, charge!!.invoiceId!!) { row, client ->
+            FollowUp.Send(money, charge!!.invoiceId!!, Baskets.storedFor(items, charge.basket)) { row, client ->
                 // The amount is always sent, so a partly captured hold is never refunded by monobank's own guess.
                 val request =
                     CancelInvoiceRequest
@@ -493,7 +496,7 @@ class PaymentService(
                             charge.invoiceId,
                         ).extRef(row.reference.toString())
                         .amount(money.minor)
-                        .items(items.ifEmpty { null })
+                        .items(items?.let(Baskets::fiscal))
                 val response = client.invoices.cancel(request.build())
                 operationChange(response.status, response.statusRaw, money.minor)
             }
@@ -501,18 +504,14 @@ class PaymentService(
 
     private sealed interface ItemsCheck {
         class Valid(
-            val items: List<FiscalizationItem>,
+            /** Null when the charge sent no items. */
+            val items: List<BasketItem>?,
         ) : ItemsCheck
 
         class Invalid(
             val reason: String,
         ) : ItemsCheck
     }
-
-    /** The basket the refunded money was charged with: the purchase's, or the hold's for a captured hold. */
-    private fun chargeBasket(rows: List<TxRow>): String? =
-        rows.firstOrNull { it.type == TransactionType.PURCHASE }?.basket
-            ?: rows.firstOrNull { it.type == TransactionType.AUTHORIZE }?.basket
 
     /**
      * Receipt items for a capture or refund (empty when the charge sent none), built from the charge's own items:
@@ -526,7 +525,7 @@ class PaymentService(
     ): ItemsCheck =
         try {
             val json = op.properties.string(Properties.BASKET_ORDER)
-            ItemsCheck.Valid(Baskets.forOperation(json, chargeBasket, money.minor).orEmpty())
+            ItemsCheck.Valid(Baskets.forOperation(json, chargeBasket, money.minor))
         } catch (e: IllegalArgumentException) {
             LOG.info("Refused {} for transaction {}: {}", op.type, op.transactionId, e.message)
             ItemsCheck.Invalid(e.message ?: "invalid basketOrder")
@@ -546,7 +545,7 @@ class PaymentService(
             }
 
             is FollowUp.Send -> {
-                when (val claim = claimFollowUp(op, next.money, next.invoiceId)) {
+                when (val claim = claimFollowUp(op, next.money, next.invoiceId, next.basket)) {
                     Claim.Unresolved -> {
                         refused(op, PREVIOUS_OPERATION_UNRESOLVED, UNRESOLVED_MESSAGE)
                     }
@@ -570,6 +569,7 @@ class PaymentService(
         op: Operation,
         money: Money,
         invoiceId: String?,
+        basket: String?,
     ): Claim =
         transactions.claim(
             NewTx(
@@ -585,6 +585,7 @@ class PaymentService(
                 amountMinor = money.minor,
                 currency = money.currency.currencyCode,
                 saveCard = false,
+                basket = basket,
             ),
         )
 

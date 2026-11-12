@@ -61,57 +61,87 @@ object Baskets {
         return items
     }
 
-    /** The basket as stored on the charge's row, to rebuild the items of its captures and refunds. */
-    fun toJson(items: List<BasketItem>?): String? =
+    /**
+     * The basket as stored on a row, to rebuild the items of later captures and refunds: the items, and whether they
+     * are the plugin's default one-unit item ([single]) or the caller's own.
+     */
+    fun toJson(
+        items: List<BasketItem>?,
+        isDefault: Boolean,
+    ): String? =
         items?.let { list ->
             JSON.writeValueAsString(
-                list.map { item ->
-                    linkedMapOf<String, Any?>(
-                        "name" to item.name,
-                        "qty" to item.qty,
-                        "sum" to item.sum,
-                        "code" to item.code,
-                        "splitReceiverId" to item.splitReceiverId,
-                        "unit" to item.unit,
-                        "tax" to item.tax,
-                        "uktzed" to item.uktzed,
-                    ).filterValues { it != null }
-                },
+                mapOf(
+                    "default" to isDefault,
+                    "items" to
+                        list.map { item ->
+                            linkedMapOf<String, Any?>(
+                                "name" to item.name,
+                                "qty" to item.qty,
+                                "sum" to item.sum,
+                                "code" to item.code,
+                                "splitReceiverId" to item.splitReceiverId,
+                                "unit" to item.unit,
+                                "tax" to item.tax,
+                                "uktzed" to item.uktzed,
+                            ).filterValues { it != null }
+                        },
+                ),
             )
         }
 
+    /** A capture's or refund's items with the charge's own default/caller marker, for storing on its row. */
+    fun storedFor(
+        items: List<BasketItem>?,
+        chargeBasket: String?,
+    ): String? = toJson(items, isDefault = chargeBasket?.let { JSON.readTree(it).path("default").asBoolean() } == true)
+
     /**
-     * The receipt items of a capture or refund of [amountMinor] (`invoice/finalize`, `invoice/cancel`), or null when
-     * the charge sent none ([chargeBasket] null):
-     * - the caller's `basketOrder` for this operation, when given (it must add up to the amount);
-     * - else the charge's default item ([single]) with the amount as its quantity;
+     * The receipt items of a capture or refund of [amountMinor] (`invoice/finalize`, `invoice/cancel`), built from
+     * the basket of the charge it acts on ([chargeBasket], null when the charge sent none). monobank accepts only
+     * the charge's own items (same name, code, unit price and split receiver) with quantities no larger:
+     * - the caller's `basketOrder` for this operation, when given: checked item by item against the charge's;
+     * - else the charge's default item with the amount as its quantity;
      * - else the charge's own items, unchanged, when the operation is for their whole total.
      * A partial operation on a charge with the caller's own items needs the caller's `basketOrder`: only the caller
-     * knows which quantities to give back.
+     * knows which quantities to give back. Throws [IllegalArgumentException] with the reason otherwise.
      */
     fun forOperation(
         json: String?,
         chargeBasket: String?,
         amountMinor: Long,
-    ): List<FiscalizationItem>? {
-        val items =
-            fromProperty(json, amountMinor) ?: run {
-                val charge = fromStored(chargeBasket) ?: return null
-                val only = charge.singleOrNull()
-                when {
-                    only != null && only.sum == UNIT_MINOR -> listOf(copy(only, quantityOf(amountMinor)))
-
-                    charge
-                        .fold(BigDecimal.ZERO) { acc, item -> acc + item.qty * BigDecimal.valueOf(item.sum) }
-                        .compareTo(BigDecimal.valueOf(amountMinor)) == 0 -> charge
-
-                    else -> throw IllegalArgumentException(
-                        "a partial capture or refund of a payment with its own basketOrder needs a basketOrder of " +
-                            "the same items with smaller quantities (monobank changes only quantities)",
-                    )
+    ): List<BasketItem>? {
+        val stored = stored(chargeBasket)
+        val given = fromProperty(json, amountMinor)
+        if (given != null) {
+            require(stored != null) { "the payment was charged without receipt items, so basketOrder cannot be used" }
+            given.forEach { item ->
+                val match = stored.items.firstOrNull { key(it) == key(item) }
+                require(match != null) {
+                    "basketOrder item '${item.name}' (${item.code}, ${item.sum}) is not in the payment's receipt"
                 }
+                require(item.qty <= match.qty) { "basketOrder item '${item.name}' has more than the payment had" }
             }
-        return items.map { item ->
+            return given
+        }
+        if (stored == null) return null
+        return when {
+            stored.isDefault -> listOf(copy(stored.items.single(), quantityOf(amountMinor)))
+
+            stored.items
+                .fold(BigDecimal.ZERO) { acc, item -> acc + item.qty * BigDecimal.valueOf(item.sum) }
+                .compareTo(BigDecimal.valueOf(amountMinor)) == 0 -> stored.items
+
+            else -> throw IllegalArgumentException(
+                "a partial capture or refund of a payment with its own basketOrder needs a basketOrder of " +
+                    "the same items with smaller quantities (monobank changes only quantities)",
+            )
+        }
+    }
+
+    /** The SDK's receipt items of a capture or refund. */
+    fun fiscal(items: List<BasketItem>): List<FiscalizationItem> =
+        items.map { item ->
             FiscalizationItem
                 .builder(item.name, item.qty, item.sum, item.code)
                 .splitReceiverId(item.splitReceiverId)
@@ -119,9 +149,26 @@ object Baskets {
                 .uktzed(item.uktzed)
                 .build()
         }
+
+    private class Stored(
+        val isDefault: Boolean,
+        val items: List<BasketItem>,
+    )
+
+    private fun stored(json: String?): Stored? {
+        if (json == null) return null
+        val node =
+            try {
+                JSON.readTree(json)
+            } catch (e: com.fasterxml.jackson.core.JacksonException) {
+                throw IllegalArgumentException("the payment's stored receipt cannot be read", e)
+            }
+        return Stored(node.path("default").asBoolean(), node.path("items").map(::item))
     }
 
-    private fun fromStored(json: String?): List<BasketItem>? = json?.let { stored -> JSON.readTree(stored).map(::item) }
+    /** What monobank matches a capture's or refund's item on. */
+    private fun key(item: BasketItem): List<Any?> =
+        listOf(item.name.take(MAX_NAME), item.code, item.sum, item.splitReceiverId)
 
     private fun copy(
         item: BasketItem,

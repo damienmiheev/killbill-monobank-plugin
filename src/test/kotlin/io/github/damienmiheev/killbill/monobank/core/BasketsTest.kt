@@ -60,6 +60,7 @@ class BasketsTest {
         val charge =
             Baskets.toJson(
                 Baskets.single(settings("org.killbill.billing.plugin.monobank.splitReceiverId=rcv-1"), "Plan", 200),
+                isDefault = true,
             )
         assertThat(Baskets.forOperation(null, null, 150)).isNull()
 
@@ -81,12 +82,31 @@ class BasketsTest {
                         """{"name":"Fee","qty":2,"sum":145,"code":"fee"}]""",
                     1290,
                 ),
+                isDefault = false,
             )
         assertThat(Baskets.forOperation(null, own, 1290)!!.map { it.code to it.qty.toInt() })
             .containsExactly("audit" to 1, "fee" to 2)
         assertThatThrownBy { Baskets.forOperation(null, own, 145) }.hasMessageContaining("needs a basketOrder")
         val feeOnly = """[{"name":"Fee","qty":1,"sum":145,"code":"fee"}]"""
         assertThat(Baskets.forOperation(feeOnly, own, 145)!!.single().code).isEqualTo("fee")
+
+        // a caller basket is checked against the charge's items before anything is sent
+        val stranger = """[{"name":"Tea","qty":1,"sum":145,"code":"tea"}]"""
+        assertThatThrownBy { Baskets.forOperation(stranger, own, 145) }.hasMessageContaining("is not in the payment")
+        val tooMany = """[{"name":"Fee","qty":3,"sum":145,"code":"fee"}]"""
+        assertThatThrownBy { Baskets.forOperation(tooMany, own, 435) }.hasMessageContaining("more than the payment had")
+        assertThatThrownBy { Baskets.forOperation(feeOnly, null, 145) }.hasMessageContaining("without receipt items")
+    }
+
+    @Test
+    fun `a caller's own item priced at one unit is not mistaken for the default one`() {
+        val coffee =
+            Baskets.toJson(
+                Baskets.fromProperty("""[{"name":"Coffee","qty":3,"sum":100,"code":"coffee"}]""", 300),
+                isDefault = false,
+            )
+        assertThatThrownBy { Baskets.forOperation(null, coffee, 150) }.hasMessageContaining("needs a basketOrder")
+        assertThat(Baskets.forOperation(null, coffee, 300)!!.single().qty).isEqualByComparingTo("3")
     }
 
     @Test
