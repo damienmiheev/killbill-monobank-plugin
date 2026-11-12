@@ -1,5 +1,5 @@
 {
-  "name": "release-tags",
+  "name": "release-tags-create",
   "target": "tag",
   "enforcement": "active",
   "conditions": {
@@ -20,18 +20,6 @@
   "rules": [
     {
       "type": "creation"
-    },
-    {
-      "type": "update"
-    },
-    {
-      "type": "deletion"
-    },
-    {
-      "type": "non_fast_forward"
-    },
-    {
-      "type": "required_signatures"
     }
   ]
 }

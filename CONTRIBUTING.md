@@ -36,10 +36,11 @@ comes with tests, and the design document stays true.
 
 - One topic per pull request, with a description of what changes and how it was tested.
 - `main` is protected: changes land only through a pull request with one approving review from a code owner
-  (approved after the last push, all threads resolved), green required checks (`check`, CodeQL `analyze`, no
-  high-severity code-scanning alerts), a linear history and signed commits (GitHub signs the squash merge).
+  (approved after the last push, all threads resolved), green required checks (`check`, CodeQL `analyze` and
+  `analyze-actions`, no high-severity code-scanning alerts), a linear history and signed commits (GitHub signs the squash merge).
   The maintainer may merge their own pull requests without a second reviewer, but never around the checks.
-- Release tags (`v*`) are created only by the maintainer and can never be moved or deleted.
+- Release tags (`v*`) are created only by the maintainer (signed); nobody, the maintainer included, can move or
+  delete one, and published releases are immutable.
 - No binaries, keys or files over 5 MB in the repository (checked in CI).
 - Commits are squashed on merge; write the title as the changelog line, and add the entry to `CHANGELOG.md`.
 
