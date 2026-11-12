@@ -41,7 +41,7 @@ jobs:
 
   # ktlint, detekt, unit tests, the bundle, and the integration tests: a real Kill Bill 0.24.22 and PostgreSQL in
   # Testcontainers with the bundle baked into the image. Needs no secrets, and never will: the live suite against
-  # monobank's test token is a separate, manually started workflow.
+  # monobank's test token (tag `live`, excluded here) runs only in live.yml, by hand or nightly, from main.
   build:
     name: build
     needs: changes
@@ -61,6 +61,9 @@ jobs:
           java-version: "21"
           cache: maven
 
+
+      - name: Install the monobank SDK (pinned commit, until it is on Maven Central)
+        run: scripts/install-monobank-sdk.sh
       - name: Verify
         run: ./mvnw -B -ntp -Pdetekt verify
 

@@ -8,9 +8,22 @@ import io.github.damienmiheev.killbill.monobank.api.MonobankPaymentPluginApi
 import io.github.damienmiheev.killbill.monobank.config.ConfigUnavailableException
 import io.github.damienmiheev.killbill.monobank.config.SystemSettings
 import io.github.damienmiheev.killbill.monobank.config.TenantSettingsProvider
+import io.github.damienmiheev.killbill.monobank.core.CardService
+import io.github.damienmiheev.killbill.monobank.core.KillBillSettler
+import io.github.damienmiheev.killbill.monobank.core.NotificationHandler
+import io.github.damienmiheev.killbill.monobank.core.PaymentService
+import io.github.damienmiheev.killbill.monobank.core.PluginMetrics
+import io.github.damienmiheev.killbill.monobank.core.TransactionSettler
+import io.github.damienmiheev.killbill.monobank.crypto.CardTokenCipher
+import io.github.damienmiheev.killbill.monobank.db.Db
+import io.github.damienmiheev.killbill.monobank.db.NotificationDao
+import io.github.damienmiheev.killbill.monobank.db.PaymentMethodDao
 import io.github.damienmiheev.killbill.monobank.db.SchemaCheck
+import io.github.damienmiheev.killbill.monobank.db.TransactionDao
 import io.github.damienmiheev.killbill.monobank.health.MonobankHealthcheck
 import io.github.damienmiheev.killbill.monobank.http.PluginServlet
+import io.github.damienmiheev.killbill.monobank.mono.MonobankClients
+import io.github.damienmiheev.killbill.monobank.reconcile.ReconcileJob
 import org.killbill.billing.osgi.api.Healthcheck
 import org.killbill.billing.osgi.api.OSGIPluginProperties
 import org.killbill.billing.osgi.libs.killbill.KillbillActivatorBase
@@ -47,34 +60,121 @@ class MonobankActivator : KillbillActivatorBase() {
         val settings = SystemSettings.load(property = configProperties::getString, env = System::getenv)
         SchemaCheck.require(dataSource.dataSource)
 
-        val tenantApi = killbillAPI.tenantUserApi
-        val tenants =
-            TenantSettingsProvider(
-                readRaw =
-                    TenantSettingsProvider.killbillReader(
-                        values = tenantApi::getTenantValuesForKey,
-                        contextFor = ::tenantContext,
-                    ),
-                boundAlias = { tenantId ->
-                    val apiKey =
-                        try {
-                            tenantApi.getTenantById(tenantId).apiKey
-                        } catch (e: TenantApiException) {
-                            throw ConfigUnavailableException("could not read the tenant (code ${e.code})", e)
-                        }
-                    settings.merchantTokenBindings[apiKey]
-                },
-                env = System::getenv,
-            )
+        val tenants = tenantSettings(settings)
         dispatcher.registerEventHandlers(tenants)
 
-        val healthcheck = MonobankHealthcheck(dataSource.dataSource, tenants)
-        register(context, PaymentPluginApi::class.java, MonobankPaymentPluginApi(clock.clock))
-        register(context, Healthcheck::class.java, healthcheck)
-        register(context, Servlet::class.java, PluginServlet(healthcheck) as HttpServlet)
+        val now = {
+            clock.clock.utcNow
+                .toDate()
+                .toInstant()
+        }
+        val db = Db(dataSource.dataSource)
+        val transactions = TransactionDao(db, now)
+        val paymentMethods = PaymentMethodDao(db, now)
+        val notificationDao = NotificationDao(db, now)
+        val cipher = CardTokenCipher(settings.cardKeys, settings.currentCardKeyId, settings.tokenHmacKey)
+        val clients = MonobankClients(settings)
+        val metrics = PluginMetrics()
+        val payments = PaymentService(transactions, paymentMethods, clients, tenants, cipher, metrics, now)
+        val cards = CardService(paymentMethods, clients, tenants, cipher)
+        val settler = KillBillSettler(killbillAPI, settings, transactions, metrics) { clock.clock.utcNow }
+        val healthcheck =
+            MonobankHealthcheck(
+                dataSource.dataSource,
+                tenants,
+                metrics,
+                java.time.Duration.ofSeconds(settings.reconcileIntervalSeconds),
+                now,
+            )
+        val job =
+            ReconcileJob(
+                settings,
+                tenants,
+                clients,
+                transactions,
+                paymentMethods,
+                notificationDao,
+                payments,
+                cards,
+                settler,
+                metrics,
+                now,
+            )
+        this.clients = clients
+        reconcile = job
+        val notifications =
+            NotificationHandler(
+                settings,
+                tenants,
+                clients,
+                transactions,
+                paymentMethods,
+                notificationDao,
+                payments,
+                // on the job's thread: the settler logs in as the plugin, never on a request thread
+                TransactionSettler { job.settleSoon(it) },
+                metrics,
+                now,
+            )
 
+        register(
+            context,
+            PaymentPluginApi::class.java,
+            MonobankPaymentPluginApi(payments, cards, transactions, clock.clock),
+        )
+        register(context, Healthcheck::class.java, healthcheck)
+        register(
+            context,
+            Servlet::class.java,
+            PluginServlet(
+                healthcheck,
+                notifications,
+                payments,
+                job::settleSoon,
+                tenants,
+                clients,
+                killbillAPI.securityApi,
+            ) as HttpServlet,
+        )
+        job.start()
         LOG.info("monobank plugin started: {}", settings)
     }
+
+    private fun tenantSettings(settings: SystemSettings): TenantSettingsProvider {
+        val tenantApi = killbillAPI.tenantUserApi
+        return TenantSettingsProvider(
+            readRaw =
+                TenantSettingsProvider.killbillReader(
+                    values = tenantApi::getTenantValuesForKey,
+                    contextFor = ::tenantContext,
+                ),
+            boundAlias = { tenantId ->
+                val apiKey =
+                    try {
+                        tenantApi.getTenantById(tenantId).apiKey
+                    } catch (e: TenantApiException) {
+                        throw ConfigUnavailableException("could not read the tenant (code ${e.code})", e)
+                    }
+                settings.merchantTokenBindings[apiKey]
+            },
+            env = System::getenv,
+        )
+    }
+
+    // Kill Bill's restart (the plugin's restart file) calls this without stop(): the job must end here too.
+    override fun stopAllButRestartMechanism(context: BundleContext) {
+        reconcile?.close()
+        reconcile = null
+        clients?.clear()
+        clients = null
+        super.stopAllButRestartMechanism(context)
+    }
+
+    @Volatile
+    private var reconcile: ReconcileJob? = null
+
+    @Volatile
+    private var clients: MonobankClients? = null
 
     private fun <S> register(
         context: BundleContext,

@@ -89,6 +89,7 @@
             <!-- the only detekt line that analyses Kotlin 2.4 -->
         </detekt.version>
         <exec-maven-plugin.version>3.7.0</exec-maven-plugin.version>
+        <it.excludedGroups>live</it.excludedGroups>
         <jackson-databind.version>
             2.23.0
             <!-- embedded privately: need not match Kill Bill's copy -->
@@ -114,6 +115,10 @@
         <maven-bundle-plugin.version>6.2.0</maven-bundle-plugin.version>
         <maven-dependency-plugin.version>3.11.0</maven-dependency-plugin.version>
         <maven.compiler.release>11</maven.compiler.release>
+        <monobank-sdk.version>
+            1.0.0-SNAPSHOT
+            <!-- pinned commit until 1.0.0 is on Maven Central: see CI -->
+        </monobank-sdk.version>
         <osgi.extra-import>org.osgi.framework;version="[1.8,2)",!kotlin.*,!com.fasterxml.*,!org.jetbrains.annotations.*,!org.intellij.lang.annotations.*</osgi.extra-import>
         <osgi.private>
             io.github.damienmiheev.killbill.monobank.*
@@ -144,6 +149,27 @@
                 <artifactId>jackson-databind</artifactId>
                 <version>${jackson-databind.version}</version>
             </dependency>
+            <dependency>
+                <!-- Comes in through Kill Bill's killbill-clock (Guice) on the build classpath only; never in the
+                     bundle. Pinned past the advisories so the dependency alerts are accurate and Dependabot manages it. -->
+                <groupId>com.google.guava</groupId>
+                <artifactId>guava</artifactId>
+                <version>33.8.0-jre</version>
+                <exclusions>
+                    <exclusion>
+                        <!-- An empty placeholder artifact that Kill Bill's parent bans. -->
+                        <groupId>com.google.guava</groupId>
+                        <artifactId>listenablefuture</artifactId>
+                    </exclusion>
+                </exclusions>
+            </dependency>
+            <dependency>
+                <groupId>io.github.damienmiheev</groupId>
+                <artifactId>monobank-bom</artifactId>
+                <version>${monobank-sdk.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
         </dependencies>
     </dependencyManagement>
 
@@ -152,6 +178,23 @@
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
             <!-- Embedded in the bundle, like kotlin-stdlib; everything provided comes from Kill Bill at runtime. -->
+        </dependency>
+        <dependency>
+            <!-- Live tests only: pays monobank's test payment pages with a test card. -->
+            <groupId>com.microsoft.playwright</groupId>
+            <artifactId>playwright</artifactId>
+            <version>1.64.0</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.github.damienmiheev</groupId>
+            <artifactId>monobank-acquiring</artifactId>
+            <!-- Embedded; its slf4j-api is Kill Bill's (declared provided below). -->
+        </dependency>
+        <dependency>
+            <groupId>io.github.damienmiheev</groupId>
+            <artifactId>monobank-testkit</artifactId>
+            <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>jakarta.servlet</groupId>
@@ -331,6 +374,8 @@
                     <!-- The integration tests boot Kill Bill with the packaged bundle. -->
                     <classesDirectory>${project.build.outputDirectory}</classesDirectory>
                     <argLine>-Xmx512m -Duser.timezone=UTC</argLine>
+                    <!-- Tests against the real monobank API run only with -Plive. -->
+                    <excludedGroups>${it.excludedGroups}</excludedGroups>
                     <systemPropertyVariables>
                         <plugin.bundle>${project.build.directory}/${project.build.finalName}.jar</plugin.bundle>
                         <plugin.version>${project.version}</plugin.version>
@@ -402,6 +447,13 @@
     </build>
 
     <profiles>
+        <profile>
+            <!-- Live tests against monobank's test merchant: `./mvnw -Plive verify -Dit.test=MonobankLiveIT`. -->
+            <id>live</id>
+            <properties>
+                <it.excludedGroups>none</it.excludedGroups>
+            </properties>
+        </profile>
         <!-- detekt 2 has no Maven plugin: run its CLI (mvn -Pdetekt verify, used by CI). -->
         <profile>
             <id>detekt</id>

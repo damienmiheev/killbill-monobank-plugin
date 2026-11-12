@@ -40,6 +40,7 @@ Kill Bill drives recurring billing; the plugin only moves money.
 - The currency is sent as its ISO 4217 numeric code (`ccy`), taken from `java.util.Currency`, not from a hand-written table.
 - Amounts are converted with the currency's own minor-unit exponent (`getDefaultFractionDigits`: 2 for UAH, USD and EUR, 0 for JPY, 3 for KWD), never an assumed 2. An amount with more decimals than its currency allows is refused (CANCELED), never rounded.
 - A tenant lists the currencies its monobank contract allows (`allowedCurrencies`, default `UAH`). Anything else is refused before calling monobank, never silently charged in hryvnia.
+- Holds: monobank documents and enforces UAH-only holds for payment pages (live: `1001` "hold payments are allowed only for UAH"), so a hosted AUTHORIZE in another currency is refused before any call. For a saved card monobank documents no limit, so a hold in EUR is sent and monobank's answer decides.
 - CAPTURE, VOID and REFUND must use the currency of the transaction they act on. A webhook or status whose `ccy` differs from the row's goes to REVIEW.
 - Saved cards are not tied to a currency: one card can be charged in any allowed currency.
 - Whether monobank accepts a currency for a given merchant (and for tokenised charges) is a matter of the merchant's contract. The plugin reports monobank's refusal as a decline with its code.
@@ -168,8 +169,10 @@ monobank documents **no idempotency key**. Two calls with the same `reference` o
   - Meanwhile the guard in step 1 blocks a second charge.
   - The charge's own webhook still matches by `reference`, because the row exists before the call. That resolves most cases long before the statement does.
   - Statement calls are made only for these rows, one window per tenant per run, at most once a minute.
-- **UNKNOWN refunds and voids** follow the same rule, matched by `extRef` in `cancelList`. A retried refund answered `WRONG_CANCEL_AMOUNT` means "maybe already refunded": it is resolved from `cancelList`, not marked FAILED.
-- **REVIEW** waits for an operator. Kill Bill's `fixPaymentTransactionState` (staff, through the caller's admin) closes it, and the plugin row follows on the next refresh.
+- **UNKNOWN refunds and voids** follow the same rule, matched by `extRef` in `cancelList`.
+- **PENDING captures, voids and refunds** that monobank has not finished after 24 hours go to REVIEW and raise `operation_stale`: they would otherwise block the next operation on that payment without anyone noticing.
+- **REVIEW** waits for an operator. Kill Bill's `fixPaymentTransactionState` (staff, through the caller's admin) closes it; the reconcile job reads that Kill Bill status and closes the plugin row in the same state (settled). The row keeps monobank's invoice id and status so the operator can find the payment.
+- **WRONG_CANCEL_AMOUNT** on a refund or void is a rejection: the row is CANCELED (nothing was cancelled by this call). The refund guard counts only refunds in SUCCESS, PENDING, SENDING, UNKNOWN or REVIEW, and a refund whose earlier attempt is still unresolved blocks a new one on the same invoice, so a retry can never refund twice.
 
 **Forward only.** SENDING → PENDING/UNKNOWN → SUCCESS/FAILED/REVIEW. Updates are guarded by `WHERE state IN (…)` and by `mono_modified_at`. A late synchronous response never overwrites a newer webhook, and `processing` never overwrites `success`. When evidence of success arrives for a FAILED row (only possible after `unknown_closed`), the row is not changed. It raises `state_conflict` for an operator, who refunds or fixes it.
 
@@ -208,6 +211,7 @@ monobank documents **no idempotency key**. Two calls with the same `reference` o
 
 - **CAPTURE** finds the AUTHORIZE row of the same Kill Bill payment. It must be SUCCESS (held), not yet captured and younger than 9 days. The plugin calls `finalize` (amount ≤ hold) and maps the response through A4. The reconcile job alerts on holds older than 8 days.
 - **VOID** of a held, uncaptured AUTHORIZE calls `cancel` without an amount, which releases the hold. Any other VOID is refused (CANCELED, "use refund"), so a void can never refund captured money.
+- **CAPTURE and REFUND carry receipt items** (`items`): the caller's `basketOrder` for this operation, or one item for the amount with the tenant's `splitReceiverId`. monobank refuses a partial finalize without them on a merchant with receipts or split payments (seen live: `1001`). A purchase split between several receivers needs the caller's `basketOrder` on each refund, naming who gives the money back.
 - **REFUND** calls `cancel` with `amount` (partial or full) and `extRef` = the refund row's `reference`. The response (`processing`, `success`, `failure`) maps through A4. A pending refund is settled from the `cancelList` entry carrying our `extRef`.
 
 ### Payment methods
@@ -257,13 +261,13 @@ It uses its own route, not Kill Bill's `/1.0/kb/paymentGateways/notification`, b
    - Known reference whose `invoice_id` doesn't match → 200, ignored, counted.
 4. Verify `X-Sign` (ECDSA over SHA-256 of the raw bytes) with **that row's tenant's merchant key**.
    - On failure, refetch the key once and verify again. Refetching is limited to once a minute per merchant, as monobank advises.
-   - Still failing → 200, ignored, counted as `notification_signature_failed`.
+   - Still failing → **401**, counted as `notification_signature_failed`. Not 200: a genuine webhook signed with a key monobank has just rotated is then sent again, by when the key may be refetched. The 401 does tell a prober that the invoice or reference is known here (unknown ones get 200); references are random UUIDs, so this is accepted.
 5. Insert into `monobank_notifications` (unique on the body hash).
    - A duplicate whose row is final and settled → 200, done.
    - A duplicate whose row is not yet settled → go on to step 7.
-6. In one DB transaction: apply the invoice status to the row (forward-only, `modifiedDate` monotonic), `walletData` to the payment method, and `cancelList` entries to refund rows. Each part applies on its own, even when another is stale.
+6. If a row for this invoice or reference is still SENDING (its own call is running), answer **503** without applying: monobank sends it again after the call has answered. Otherwise, in one DB transaction: apply the invoice status to the row (forward-only, `modifiedDate` monotonic), `walletData` to the payment method, and `cancelList` entries to refund rows. Each part applies on its own, even when another is stale.
 7. If the row is final and not settled, settle it (A6). Skip this while the row is SENDING, because the synchronous call in progress will return the row's state to Kill Bill itself.
-8. Answer **200** when the event was applied, was a duplicate or was deliberately ignored. Answer **503** only for transient failures (database or Kill Bill unavailable).
+8. Answer **200** when the event was applied, was a duplicate or was deliberately ignored, **401** for a failed shared secret or signature, **503** for transient failures (database unavailable, monobank's key unavailable). A row that was still SENDING when the webhook arrived is not settled here: its own call answers Kill Bill.
 
 **Reversals.** Each `cancelList` entry must match a refund or void row by `extRef`. An entry with no match is a cancel the plugin didn't start (a chargeback, or a cancel in monobank's portal). It is recorded and raises `unexpected_reversal`. The PURCHASE row stays SUCCESS, and v1 doesn't create a Kill Bill chargeback by itself.
 
@@ -271,13 +275,15 @@ It uses its own route, not Kill Bill's `/1.0/kb/paymentGateways/notification`, b
 
 - **Requires Kill Bill authentication** (Basic auth plus the tenant's API key and secret). The route checks that the Shiro subject is authenticated and has `payment:transition`, and that the payment belongs to that tenant.
 - It calls `invoice/remove`, then `invoice/status`.
-  - **Removed or expired:** the row becomes FAILED (`canceled_by_merchant`) and is settled, so Kill Bill shows PAYMENT_FAILURE and the invoice stays unpaid. Answer 200 with the final state.
+  - **Removed or expired:** the row becomes FAILED (`expired`, or `CANCELED_BY_MERCHANT` when monobank no longer finds the removed invoice) and is settled, so Kill Bill shows PAYMENT_FAILURE and the invoice stays unpaid. Answer 200 with the final state.
   - **The customer paid at the same moment** (status `processing`, `success` or `hold`; `remove` refuses a paid invoice): nothing is cancelled. Answer **409** with the live state. The payment then settles normally, and the caller must treat it as paid.
+  - **Anything else** (monobank did not answer, or the page is in no state that says either): **503**, ask again.
+  - Settling runs on the reconcile job's thread: the settler logs in as the plugin's own Kill Bill user, which must not replace the caller's session.
 - It is idempotent: a second call returns the current state.
 
 ### `GET /healthcheck`
 
-The database is reachable and the tables are present. With a tenant it also reports: config valid, last successful monobank call and last verified webhook (from memory). It never calls monobank per probe and never returns secrets or customer data, because the route is unauthenticated.
+The database is reachable, the tables are present and the reconcile job has run within three intervals. With a tenant it also reports whether the config is valid. Counters, the last monobank call and the last verified webhook (from memory) and the config's errors are shown only to authenticated Kill Bill callers; Kill Bill's own `/1.0/healthcheck` gets none of them. It never calls monobank per probe and never returns secrets or customer data.
 
 **The plugin's Kill Bill user.** Settling a PENDING transaction needs a Shiro subject with `payment:transition`, and webhooks and the reconcile job arrive without one. The plugin logs in as a **dedicated Kill Bill user whose role has only `payment:transition`**, given in system config, never `admin`. It logs out in `finally` on every thread. Without this user the plugin refuses to start. (See A6 for possibly dropping it.)
 
@@ -315,7 +321,7 @@ There is no global fallback token. A tenant without valid config can't make paym
 | `…monobank.tokenHmacKey` | Base64 key for `card_token_hmac`, or `env:NAME`. Required. |
 | `…monobank.merchantTokenBindings` | `apiKey:alias[,…]`: which `env:` alias each tenant (named by its Kill Bill API key, chosen before the tenant exists) may use. |
 | `…monobank.notificationSharedSecret` | Optional (A7), at least 32 characters. |
-| `…monobank.reconcileIntervalSeconds`, `readTimeoutSeconds`, `statementMinIntervalSeconds` | Tuning. |
+| `…monobank.reconcileIntervalSeconds`, `readTimeoutSeconds`, `statementMinIntervalSeconds` | Tuning. `readTimeoutSeconds` is at most 25: Kill Bill gives a plugin call 30 s. |
 | `…monobank.apiBaseUrl` | Default `https://api.monobank.ua`. Must be https; plain http only for local and test hosts (`localhost`, `*.internal`, `*.local`, `*.test`), where tests run a fake. |
 
 ## A10. Threat model (plugin)

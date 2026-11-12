@@ -6,9 +6,8 @@
 
 A [Kill Bill](https://killbill.io) payment plugin for [monobank](https://monobank.ua) internet acquiring (Ukraine).
 
-> **Status: under construction (0.1.0-SNAPSHOT).** The bundle loads, checks its schema and settings and reports
-> health. Payment operations are being implemented one by one and are refused (`PLUGIN_FAILURE`,
-> `NOT_IMPLEMENTED`) until then. Do not use it for real money before 0.1.0 is released.
+> **Status: 0.1.0-SNAPSHOT, not released yet.** Every operation below is built and tested against a real Kill Bill and
+> the SDK's fake monobank. The release follows the live tests against monobank's test merchant (see CONTRIBUTING).
 
 It maps Kill Bill's payment API onto monobank with **one Kill Bill transaction per real monobank operation**:
 
@@ -23,7 +22,7 @@ It maps Kill Bill's payment API onto monobank with **one Kill Bill transaction p
 | Saved cards | Kill Bill payment methods backed by monobank wallet tokens |
 | `getPaymentInfo` | refreshed from `GET /api/merchant/invoice/status`, so Kill Bill's Janitor can settle anything |
 
-What it is designed around (being built; see the status above):
+What it is built around:
 
 - **No double charges.** monobank has no idempotency key, so the plugin keys every call by the Kill Bill
   transaction, never retries a call whose outcome is unknown (it becomes `UNKNOWN` and is resolved from monobank),
@@ -68,7 +67,7 @@ Any value may be `env:NAME` to read it from the environment.
 | `merchantTokenBindings` | no | `apiKey:alias[,…]`: lets the tenant with that Kill Bill API key use `merchantToken=env:<alias>`. |
 | `notificationSharedSecret` | no | If set (at least 32 characters), webhook calls must carry it in `X-Notification-Secret` (for setups that forward monobank's webhook). |
 | `apiBaseUrl` | no | Default `https://api.monobank.ua`. https only; plain http only for local and test hosts. |
-| `readTimeoutSeconds` | no | Default 15. |
+| `readTimeoutSeconds` | no | Default 15, at most 25 (Kill Bill gives a plugin call 30 s). |
 | `reconcileIntervalSeconds` | no | Default 300. |
 | `statementMinIntervalSeconds` | no | Default 60. |
 
@@ -100,13 +99,58 @@ org.killbill.billing.plugin.monobank.allowedCurrencies=UAH
 | `language` | no | `uk` (default) or `en`. |
 | `allowedCurrencies` | no | Comma-separated ISO 4217 codes the merchant's contract allows. Default `UAH`. |
 | `checkoutValiditySeconds` | no | Lifetime of a hosted page. Default 3600. |
+| `basketItemCode` | no | When set, every payment carries a one-item basket (`merchantPaymInfo.basketOrder`) with this product code, unless the caller passes its own. Merchants with fiscal receipts or split payments need a basket. |
+| `splitReceiverId` | no | The split receiver every basket item goes to (merchants with split payments). Implies a basket. |
 
 There is no global fallback: a tenant without valid settings cannot make payments and reports unhealthy.
+
+## Using it
+
+Plugin properties (`pluginProperty=key=value` on Kill Bill's payment calls):
+
+| Property | Meaning |
+|---|---|
+| `hosted=true` | Pay on monobank's page. The transaction is PENDING; read `formUrl` from the transaction's plugin properties (`GET /1.0/kb/payments/{id}?withPluginInfo=true`) and send the customer there. Without it, the payment method's saved card is charged; with no saved card the charge is declined (`NO_ACTIVE_CARD`), never turned into a page nobody sees. |
+| `saveCard=true` | With `hosted=true`: save the card on the payment method (the customer must agree). |
+| `redirectUrl`, `destination`, `validitySeconds` | Overrides for one hosted payment. |
+| `callerRef` | Your own id for the payment (e.g. a checkout id); stored and returned as a property. |
+| `basketOrder` | A JSON array of `{name, qty, sum, code}` (plus `splitReceiverId`, `unit`, `tax`, `uktzed`) adding up to the amount. |
+| `initiationKind=client` | A saved-card charge made with the customer present (default `merchant`). |
+
+Transactions return `formUrl`, `tdsUrl` (3-D Secure), `invoiceId`, `expiresAt`, `callerRef` and `reference` as plugin
+properties. Holds (AUTHORIZE) on a payment page are UAH only, as monobank enforces; a saved-card hold in
+another currency is sent and monobank decides.
+
+Routes under `/plugins/killbill-monobank/`:
+
+| Route | Auth | What |
+|---|---|---|
+| `POST /notification` | monobank's signature (and `X-Notification-Secret` if configured) | monobank's webhook. |
+| `POST /payments/{paymentId}/cancel` | Kill Bill credentials with `payment:transition` | Gives up an unpaid hosted page: 200 when cancelled, 409 when the customer paid or is paying, 503 when monobank has not settled the page yet (ask again), 404 for a payment of another tenant. |
+| `GET /pubkey` | Kill Bill credentials | monobank's current webhook public key, for a forwarder that verifies before forwarding. |
+| `GET /healthcheck` | none | Database, schema, reconcile job; with Kill Bill credentials also the counters, with tenant headers the tenant's settings. |
 
 ## Health
 
 `GET /plugins/killbill-monobank/healthcheck` (and Kill Bill's `/1.0/healthcheck`). With tenant API key headers it
-also reports whether that tenant's settings are valid. It never calls monobank and never returns secrets.
+also reports whether that tenant's settings are valid. It is unhealthy when the database or schema is missing, the
+tenant's settings are invalid, or the reconcile job has not run for three intervals. The counters an operator alerts
+on (`stateConflict`, `unexpectedReversal`, `amountMismatch`, `unknownClosed`, `signatureFailed`, `holdsNearExpiry`,
+`operationStale`)
+are shown only to authenticated Kill Bill callers. It never calls monobank and never returns secrets.
+
+## Payments that need an operator
+
+- **REVIEW**: monobank reported a different amount or currency than Kill Bill asked for, or held a purchase. The
+  Kill Bill transaction stays `UNKNOWN` and the plugin stores monobank's invoice id and status. Fix the transaction
+  in Kill Bill (admin API); the reconcile job then closes the plugin's row in the same state.
+- **state_conflict**: Kill Bill and monobank disagree on a final state, or monobank reports success for a charge the
+  plugin had closed as failed. Nothing is overwritten; the counter rises and the log names the transaction.
+- **unexpected_reversal**: a refund or chargeback the plugin did not start (made in monobank's portal).
+- **holdsNearExpiry**: holds made more than 7 days ago that are neither captured nor voided; monobank releases them
+  at 9.
+- **operationStale**: a capture, void or refund monobank has not finished after 24 hours; it is held for review
+  because it blocks the next operation on that payment.
 
 ## Security
 

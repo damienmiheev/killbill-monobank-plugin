@@ -60,12 +60,28 @@ class SystemSettingsTest {
                     "kbPassword points at environment variable MISSING, which is not set",
                     "tokenHmacKey must be 32 bytes, base64-encoded",
                     "apiBaseUrl must be an absolute https URL (http only for local and test hosts)",
-                    "readTimeoutSeconds must be a number from 1 to 120",
+                    "readTimeoutSeconds must be a number from 1 to 25",
                 )
                 assertThat(errors).anyMatch { it.startsWith("cardKeys[k1] must be 32 bytes") }
                 assertThat(errors).anyMatch { it.contains("must be id:base64key") }
                 assertThat(errors.joinToString()).doesNotContain(key1)
             })
+    }
+
+    @Test
+    fun `a read timeout longer than Kill Bill's 30-second plugin call is refused`() {
+        val props = minimal().apply { put("${p}readTimeoutSeconds", "26") }
+        assertThatThrownBy { SystemSettings.load(props::get) { null } }
+            .isInstanceOf(InvalidSettingsException::class.java)
+        assertThat(
+            SystemSettings
+                .load(
+                    minimal().apply {
+                        put("${p}readTimeoutSeconds", "25")
+                    }::get,
+                ) { null }
+                .readTimeoutSeconds,
+        ).isEqualTo(25)
     }
 
     @Test
