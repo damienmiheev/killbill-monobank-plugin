@@ -170,7 +170,8 @@ class PluginServlet(
             try {
                 security.checkCurrentUserPermissions(listOf(permission), Logical.AND, TenantOnly(tenant.id))
             } catch (e: SecurityApiException) {
-                LOG.info("Refused {} without {}", req.pathInfo, permission, e)
+                // The path is the caller's text: it is not logged.
+                LOG.info("Refused a request for tenant {} without {}", tenant.id, permission, e)
                 json(resp, HttpServletResponse.SC_FORBIDDEN, mapOf("error" to "missing permission"))
                 return null
             }

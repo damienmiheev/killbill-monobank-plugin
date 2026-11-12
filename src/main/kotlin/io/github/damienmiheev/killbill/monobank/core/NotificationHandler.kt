@@ -71,7 +71,7 @@ class NotificationHandler(
         } catch (e: SQLException) {
             LOG.warn(
                 "Database unavailable while handling a webhook for invoice {}; monobank will retry",
-                status.invoiceId,
+                logSafe(status.invoiceId),
                 e,
             )
             Result.RETRY_LATER
@@ -85,7 +85,7 @@ class NotificationHandler(
     ): Result {
         val tenantId =
             tenantOf(status)
-                ?: return Result.IGNORED.also { LOG.debug("Webhook for unknown invoice {}", status.invoiceId) }
+                ?: return Result.IGNORED.also { LOG.debug("Webhook for unknown invoice {}", logSafe(status.invoiceId)) }
         val tenantSettings =
             (tenants.get(tenantId) as? TenantSettings.ParseResult.Valid)?.settings ?: return Result.RETRY_LATER
         when (clients.forToken(tenantSettings.merchantToken).webhooks.check(xSign, body)) {
@@ -98,14 +98,14 @@ class NotificationHandler(
                 // Not 200: a genuine webhook signed with a key monobank just rotated is sent again later, by when
                 // the SDK may fetch the new key (at most once a minute). The 401 does tell a prober that the
                 // invoice or reference is known here; references are random UUIDs and invoice ids are monobank's.
-                LOG.warn("Webhook for invoice {} failed signature verification; refused", status.invoiceId)
+                LOG.warn("Webhook for invoice {} failed signature verification; refused", logSafe(status.invoiceId))
                 return Result.UNAUTHORIZED
             }
 
             VerificationResult.KEY_UNAVAILABLE -> {
                 LOG.warn(
                     "monobank's webhook key is unavailable; webhook for invoice {} will be retried",
-                    status.invoiceId,
+                    logSafe(status.invoiceId),
                 )
                 return Result.RETRY_LATER
             }
@@ -116,7 +116,7 @@ class NotificationHandler(
             // settles it), so monobank is asked to send it again; by then the call has answered.
             LOG.info(
                 "Webhook for invoice {} arrived during the plugin's own call; monobank will retry",
-                status.invoiceId,
+                logSafe(status.invoiceId),
             )
             return Result.RETRY_LATER
         }
@@ -152,8 +152,8 @@ class NotificationHandler(
             LOG.warn(
                 "Webhook reference {} belongs to invoice {}, not {}; ignored",
                 reference,
-                row.invoiceId,
-                status.invoiceId,
+                logSafe(row.invoiceId),
+                logSafe(status.invoiceId),
             )
             return null
         }

@@ -40,6 +40,7 @@ Kill Bill drives recurring billing; the plugin only moves money.
 - The currency is sent as its ISO 4217 numeric code (`ccy`), taken from `java.util.Currency`, not from a hand-written table.
 - Amounts are converted with the currency's own minor-unit exponent (`getDefaultFractionDigits`: 2 for UAH, USD and EUR, 0 for JPY, 3 for KWD), never an assumed 2. An amount with more decimals than its currency allows is refused (CANCELED), never rounded.
 - A tenant lists the currencies its monobank contract allows (`allowedCurrencies`, default `UAH`). Anything else is refused before calling monobank, never silently charged in hryvnia.
+- Holds: monobank documents and enforces UAH-only holds for payment pages (live: `1001` "hold payments are allowed only for UAH"), so a hosted AUTHORIZE in another currency is refused before any call. For a saved card monobank documents no limit, so a hold in EUR is sent and monobank's answer decides.
 - CAPTURE, VOID and REFUND must use the currency of the transaction they act on. A webhook or status whose `ccy` differs from the row's goes to REVIEW.
 - Saved cards are not tied to a currency: one card can be charged in any allowed currency.
 - Whether monobank accepts a currency for a given merchant (and for tokenised charges) is a matter of the merchant's contract. The plugin reports monobank's refusal as a decline with its code.
@@ -210,6 +211,7 @@ monobank documents **no idempotency key**. Two calls with the same `reference` o
 
 - **CAPTURE** finds the AUTHORIZE row of the same Kill Bill payment. It must be SUCCESS (held), not yet captured and younger than 9 days. The plugin calls `finalize` (amount ≤ hold) and maps the response through A4. The reconcile job alerts on holds older than 8 days.
 - **VOID** of a held, uncaptured AUTHORIZE calls `cancel` without an amount, which releases the hold. Any other VOID is refused (CANCELED, "use refund"), so a void can never refund captured money.
+- **CAPTURE and REFUND carry receipt items** (`items`): the caller's `basketOrder` for this operation, or one item for the amount with the tenant's `splitReceiverId`. monobank refuses a partial finalize without them on a merchant with receipts or split payments (seen live: `1001`). A purchase split between several receivers needs the caller's `basketOrder` on each refund, naming who gives the money back.
 - **REFUND** calls `cancel` with `amount` (partial or full) and `extRef` = the refund row's `reference`. The response (`processing`, `success`, `failure`) maps through A4. A pending refund is settled from the `cancelList` entry carrying our `extRef`.
 
 ### Payment methods

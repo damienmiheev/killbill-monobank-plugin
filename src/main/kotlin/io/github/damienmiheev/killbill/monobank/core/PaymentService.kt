@@ -170,8 +170,12 @@ class PaymentService(
                 ?: return ChargeRefusal(refused(op, CONFIG_INVALID, "the tenant's monobank settings are not valid"))
         val money =
             money(op, settings) ?: return ChargeRefusal(refused(op, INVALID_AMOUNT, "amount or currency not allowed"))
-        if (op.type == TransactionType.AUTHORIZE && money.currency.currencyCode != UAH) {
-            return ChargeRefusal(refused(op, INVALID_AMOUNT, "monobank holds work only in UAH"))
+        // monobank documents and enforces UAH-only holds for payment pages (live: 1001 "hold payments are allowed
+        // only for UAH"); for a saved card it documents no limit, so monobank's answer decides.
+        if (op.type == TransactionType.AUTHORIZE && op.properties.flag(Properties.HOSTED) &&
+            money.currency.currencyCode != UAH
+        ) {
+            return ChargeRefusal(refused(op, INVALID_AMOUNT, "monobank holds payment pages only in UAH"))
         }
         val destination = op.properties.string(Properties.DESTINATION) ?: settings.destination ?: DEFAULT_DESTINATION
         val basket =
@@ -409,7 +413,11 @@ class PaymentService(
                     else -> null
                 }
             if (refusal != null) return@followUp FollowUp.Refuse(INVALID_OPERATION, refusal)
-            val items = operationItems(op, settings, money) ?: return@followUp INVALID_ITEMS
+            val items =
+                when (val checked = operationItems(op, settings, money)) {
+                    is ItemsCheck.Invalid -> return@followUp FollowUp.Refuse(INVALID_BASKET, checked.reason)
+                    is ItemsCheck.Valid -> checked.items
+                }
             FollowUp.Send(money, auth!!.invoiceId!!) { _, client ->
                 val response =
                     client.invoices.finalize(
@@ -471,7 +479,11 @@ class PaymentService(
                     else -> null
                 }
             if (refusal != null) return@followUp FollowUp.Refuse(INVALID_OPERATION, refusal)
-            val items = operationItems(op, settings, money) ?: return@followUp INVALID_ITEMS
+            val items =
+                when (val checked = operationItems(op, settings, money)) {
+                    is ItemsCheck.Invalid -> return@followUp FollowUp.Refuse(INVALID_BASKET, checked.reason)
+                    is ItemsCheck.Valid -> checked.items
+                }
             FollowUp.Send(money, charge!!.invoiceId!!) { row, client ->
                 // The amount is always sent, so a partly captured hold is never refunded by monobank's own guess.
                 val request =
@@ -486,21 +498,33 @@ class PaymentService(
             }
         }
 
+    private sealed interface ItemsCheck {
+        class Valid(
+            val items: List<FiscalizationItem>,
+        ) : ItemsCheck
+
+        class Invalid(
+            val reason: String,
+        ) : ItemsCheck
+    }
+
     /**
-     * Receipt items for a capture or refund (empty when the tenant uses none), or null when the caller's basket is
-     * invalid. monobank refuses a partial amount without them on a merchant with receipts or split payments.
+     * Receipt items for a capture or refund (empty when the tenant uses none). monobank refuses a partial amount
+     * without them on a merchant with receipts or split payments. A purchase split between several receivers needs
+     * the caller's `basketOrder` on its refunds too; otherwise the tenant's one receiver is named.
      */
     private fun operationItems(
         op: Operation,
         settings: TenantSettings,
         money: Money,
-    ): List<FiscalizationItem>? {
+    ): ItemsCheck {
         val name = op.properties.string(Properties.DESTINATION) ?: settings.destination ?: DEFAULT_DESTINATION
         return try {
-            Baskets.forOperation(settings, name, op.properties.string(Properties.BASKET_ORDER), money.minor).orEmpty()
+            val json = op.properties.string(Properties.BASKET_ORDER)
+            ItemsCheck.Valid(Baskets.forOperation(settings, name, json, money.minor).orEmpty())
         } catch (e: IllegalArgumentException) {
             LOG.info("Refused {} for transaction {}: {}", op.type, op.transactionId, e.message)
-            null
+            ItemsCheck.Invalid(e.message ?: "invalid basketOrder")
         }
     }
 
@@ -1071,7 +1095,6 @@ class PaymentService(
         private val PAID_OR_PAYING = setOf("processing", "success", "hold")
 
         private const val UAH = "UAH"
-        private val INVALID_ITEMS = FollowUp.Refuse(INVALID_BASKET, "basketOrder must add up to the amount")
         private val CAPTURE_OR_VOID = setOf(TransactionType.CAPTURE, TransactionType.VOID)
         private val VALIDITY_RANGE = 60L..2_592_000L
         const val INVALID_REQUEST = "INVALID_REQUEST"

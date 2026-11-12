@@ -1,0 +1,85 @@
+name: Live
+
+# The plugin in a real Kill Bill against monobank's real acquiring API with a TEST merchant token. Playwright pays
+# the test payment pages with a test card (test mode accepts any Luhn-valid number and charges nothing), then the
+# suite settles, captures, voids and refunds. Never on pull requests: the token lives in the protected environment
+# `monobank-test`, which only this workflow on `main` can use, so code from a fork never sees it.
+#
+# Setup (once, by the owner): environment `monobank-test` limited to the `main` branch, with
+#   secret   MONOBANK_ACQUIRING_TEST_TOKEN  a monobank acquiring TEST token (never a production one)
+#   variable MONOBANK_TEST_CARD             number|MM/YY|CVC of a test card, e.g. a published Luhn-valid test number
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 3 * * *"
+
+permissions: {}
+
+concurrency:
+  group: live
+  cancel-in-progress: false
+
+jobs:
+  live:
+    name: live
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    environment: monobank-test
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Credentials are configured
+        env:
+          TOKEN: ${{ secrets.MONOBANK_ACQUIRING_TEST_TOKEN }}
+          CARD: ${{ vars.MONOBANK_TEST_CARD }}
+        run: |
+          if [ -z "$TOKEN" ] || [ -z "$CARD" ]; then
+            echo "::error::Set secret MONOBANK_ACQUIRING_TEST_TOKEN and variable MONOBANK_TEST_CARD in environment monobank-test"
+            exit 1
+          fi
+
+      - name: Install the monobank SDK (pinned commit, until it is on Maven Central)
+        run: scripts/install-monobank-sdk.sh
+
+      - name: Build the bundle
+        run: ./mvnw -B -ntp -DskipTests -DskipITs install
+
+      - name: Install Chromium for Playwright
+        run: >-
+          ./mvnw -B -ntp exec:java -Dexec.classpathScope=test -Dexec.mainClass=com.microsoft.playwright.CLI
+          -Dexec.args="install --with-deps chromium"
+
+      # The payer first, against a local copy of the payment page, then the real thing.
+      - name: Live tests
+        env:
+          MONOBANK_ACQUIRING_TEST_TOKEN: ${{ secrets.MONOBANK_ACQUIRING_TEST_TOKEN }}
+          MONOBANK_TOKEN_IS_TEST: "1"
+          MONOBANK_LIVE_PAY: auto
+          MONOBANK_TEST_CARD: ${{ vars.MONOBANK_TEST_CARD }}
+        run: >-
+          ./mvnw -B -ntp -Plive verify -Dtest=NoSuchTest -Dsurefire.failIfNoSpecifiedTests=false
+          -Dit.test=LivePayerIT,MonobankLiveIT
+
+      - name: Screenshots and reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: live
+          path: |
+            target/live-screenshots/
+            target/live-payer-it/
+            target/failsafe-reports/
+            target/killbill-*.log
+          retention-days: 14

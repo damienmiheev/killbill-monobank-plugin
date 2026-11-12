@@ -164,6 +164,27 @@ class TenantSettingsTest {
     }
 
     @Test
+    fun `only the currencies monobank accepts can be allowed`() {
+        val errs =
+            errors(
+                "${prefix}merchantToken=tok",
+                "${prefix}webhookUrl=https://example.com/hook",
+                "${prefix}allowedCurrencies=UAH,GBP,PLN",
+            )
+        assertThat(errs).containsExactly(
+            "allowedCurrencies: monobank accepts only UAH, USD, EUR, not GBP",
+            "allowedCurrencies: monobank accepts only UAH, USD, EUR, not PLN",
+        )
+        val all =
+            valid(
+                "${prefix}merchantToken=tok",
+                "${prefix}webhookUrl=https://example.com/hook",
+                "${prefix}allowedCurrencies=UAH,USD,EUR",
+            )
+        assertThat(all.allowedCurrencies.map { it.currencyCode }).containsExactlyInAnyOrder("UAH", "USD", "EUR")
+    }
+
+    @Test
     fun `secrets never show in toString`() {
         val s = valid("${prefix}merchantToken=tok-123", "${prefix}webhookUrl=https://example.com/hook")
         assertThat(s.toString()).doesNotContain("tok-123")

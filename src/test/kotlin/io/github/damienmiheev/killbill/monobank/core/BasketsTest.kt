@@ -54,6 +54,21 @@ class BasketsTest {
     }
 
     @Test
+    fun `captures and refunds carry no items when the tenant uses no receipts, one item when it does`() {
+        assertThat(Baskets.forOperation(settings(), "Plan", null, 1500)).isNull()
+        val items =
+            Baskets.forOperation(
+                settings("org.killbill.billing.plugin.monobank.splitReceiverId=rcv-1"),
+                "Plan",
+                null,
+                1500,
+            )!!
+        assertThat(
+            items.map { Triple(it.sum, it.qty.toInt(), it.splitReceiverId) },
+        ).containsExactly(Triple(1500L, 1, "rcv-1"))
+    }
+
+    @Test
     fun `fractional quantities add up exactly, and a fractional sum is refused`() {
         val json = """[{"name":"Hours","qty":0.1,"sum":1000,"code":"h"},{"name":"Kg","qty":2.5,"sum":30,"code":"kg"}]"""
         assertThat(Baskets.fromProperty(json, 175)).hasSize(2)

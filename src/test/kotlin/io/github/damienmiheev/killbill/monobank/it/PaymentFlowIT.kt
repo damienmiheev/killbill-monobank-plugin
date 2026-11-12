@@ -9,6 +9,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import io.github.damienmiheev.monobank.testkit.FakeMonobankAcquiring
 import io.github.damienmiheev.monobank.testkit.Fault
 import io.github.damienmiheev.monobank.testkit.MonobankPaths
+import io.github.damienmiheev.monobank.testkit.SplitReceiver
 import io.github.damienmiheev.monobank.testkit.WebhookDelivery
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.AfterAll
@@ -30,9 +31,17 @@ class PaymentFlowIT {
 
     @BeforeAll
     fun start() {
-        fake = FakeMonobankAcquiring().start()
+        fake =
+            FakeMonobankAcquiring
+                .builder()
+                // like monobank's test merchant: receipts and split payments on
+                .fiscalization(true)
+                .splitPayments(true)
+                .build()
+                .start()
         stack = KillBillStack(fake = fake)
         stack.start()
+        stack.moneyTenant("org.killbill.billing.plugin.monobank.splitReceiverId=${SplitReceiver.DEFAULT.id}")
     }
 
     @AfterAll
@@ -511,7 +520,7 @@ class PaymentFlowIT {
     }
 
     @Test
-    fun `payments in another allowed currency use its own minor unit`() {
+    fun `a dollar payment is paid and refunded in cents, and a currency monobank does not take is refused`() {
         val tenant = stack.moneyTenant()
         val account = stack.createAccount(tenant, currency = "USD")
         val pm = stack.addPaymentMethod(tenant, account)
@@ -536,21 +545,94 @@ class PaymentFlowIT {
         val invoice = fake.invoice(invoiceId)!!
         assertThat(invoice.amount).isEqualTo(1999L)
         assertThat(invoice.ccy).isEqualTo(840)
+        // paid and partly refunded in US cents
+        val usdPayment = pending.path("paymentId").asText()
+        fake.payInvoice(invoiceId)
+        val paid = stack.awaitPayment(tenant, usdPayment) { it.status() == "SUCCESS" }
+        assertThat(paid.path("currency").asText()).isEqualTo("USD")
+        assertThat(paid.path("purchasedAmount").decimalValue()).isEqualByComparingTo("19.99")
+        stack.followUp(tenant, usdPayment, "REFUND", "5.01", currency = "USD")
+        val refunded = stack.awaitPayment(tenant, usdPayment) { it.path("refundedAmount").decimalValue().signum() > 0 }
+        assertThat(refunded.path("refundedAmount").decimalValue()).isEqualByComparingTo("5.01")
+        assertThat(fake.requests().last { it.path == MonobankPaths.INVOICE_CANCEL }.body).contains("\"amount\":501")
 
-        val notAllowed = stack.createAccount(tenant, currency = "EUR")
-        val eurPm = stack.addPaymentMethod(tenant, notAllowed)
+        val notAllowed = stack.createAccount(tenant, currency = "GBP")
+        val gbpPm = stack.addPaymentMethod(tenant, notAllowed)
         val refused =
             stack.pay(
                 tenant,
                 notAllowed,
-                eurPm,
+                gbpPm,
                 "PURCHASE",
                 "5.00",
-                currency = "EUR",
+                currency = "GBP",
                 properties =
                     mapOf("hosted" to "true"),
             )
         assertThat(refused.status()).isEqualTo("PLUGIN_FAILURE")
         assertThat(refused.tx().path("gatewayErrorCode").asText()).isEqualTo("INVALID_AMOUNT")
+    }
+
+    @Test
+    fun `a euro account pays in euro, saves the card, is charged and refunded in euro cents, and holds only by card`() {
+        val tenant = stack.moneyTenant()
+        val account = stack.createAccount(tenant, currency = "EUR")
+        val pm = stack.addPaymentMethod(tenant, account)
+        val pending =
+            stack.pay(
+                tenant,
+                account,
+                pm,
+                "PURCHASE",
+                "49.90",
+                currency = "EUR",
+                properties = mapOf("hosted" to "true", "saveCard" to "true"),
+            )
+        val paymentId = pending.path("paymentId").asText()
+        val invoiceId = stack.payment(tenant, paymentId, withPluginInfo = true).prop("invoiceId")!!
+        assertThat(fake.invoice(invoiceId)!!.amount).isEqualTo(4990L)
+        assertThat(fake.invoice(invoiceId)!!.ccy).isEqualTo(978)
+        fake.payInvoice(invoiceId)
+        val paid = stack.awaitPayment(tenant, paymentId) { it.status() == "SUCCESS" }
+        assertThat(paid.path("currency").asText()).isEqualTo("EUR")
+        assertThat(paid.path("purchasedAmount").decimalValue()).isEqualByComparingTo("49.90")
+        awaitCardActive(tenant, pm)
+
+        val renewal = stack.pay(tenant, account, pm, "PURCHASE", "12.34", currency = "EUR")
+        assertThat(renewal.status()).isEqualTo("SUCCESS")
+        val renewalInvoice = fake.invoices().last { it.viaWallet && it.amount == 1234L }
+        assertThat(renewalInvoice.ccy).isEqualTo(978)
+
+        stack.followUp(tenant, paymentId, "REFUND", "10.00", currency = "EUR")
+        val refunded =
+            stack.awaitPayment(tenant, paymentId) {
+                it.path("refundedAmount").decimalValue().compareTo(java.math.BigDecimal("10.00")) == 0
+            }
+        assertThat(refunded.path("refundedAmount").decimalValue()).isEqualByComparingTo("10.00")
+
+        // monobank holds payment pages only in hryvnia: a hosted euro hold is refused before reaching monobank
+        val before = fake.requests().size
+        val hostedHold =
+            stack.pay(
+                tenant,
+                account,
+                pm,
+                "AUTHORIZE",
+                "5.00",
+                currency = "EUR",
+                properties = mapOf("hosted" to "true"),
+            )
+        assertThat(hostedHold.status()).isEqualTo("PLUGIN_FAILURE")
+        assertThat(hostedHold.tx().path("gatewayErrorCode").asText()).isEqualTo("INVALID_AMOUNT")
+        assertThat(fake.requests().size).isEqualTo(before)
+
+        // a saved-card hold in euro is left to monobank (no documented limit), then captured in euro cents
+        val cardHold = stack.pay(tenant, account, pm, "AUTHORIZE", "5.00", currency = "EUR")
+        assertThat(cardHold.status()).isEqualTo("SUCCESS")
+        val holdId = cardHold.path("paymentId").asText()
+        stack.followUp(tenant, holdId, "CAPTURE", "3.21", currency = "EUR")
+        val captured = stack.awaitPayment(tenant, holdId) { it.path("capturedAmount").decimalValue().signum() > 0 }
+        assertThat(captured.path("capturedAmount").decimalValue()).isEqualByComparingTo("3.21")
+        assertThat(fake.requests().last { it.path == MonobankPaths.INVOICE_FINALIZE }.body).contains("\"amount\":321")
     }
 }

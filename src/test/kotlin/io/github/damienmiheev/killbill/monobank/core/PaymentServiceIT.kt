@@ -438,4 +438,30 @@ class PaymentServiceIT : ServiceHarness() {
         assertThat(declined.errorCode).isEqualTo("59")
         assertThat(paymentMethods.find(pm)!!.cardStatus).isEqualTo(CardStatus.ACTIVE)
     }
+
+    @Test
+    fun `a euro page paid in another currency is held for review, never settled as paid`() {
+        val eur =
+            op(TransactionType.PURCHASE, UUID.randomUUID(), UUID.randomUUID(), null, "15.50", "hosted" to "true")
+                .copy(currency = Currency.EUR)
+        val page = stored(payments.charge(eur))
+        val invoice = fake.invoice(page.invoiceId!!)!!
+        assertThat(invoice.ccy).isEqualTo(978)
+        assertThat(invoice.amount).isEqualTo(1550L)
+        fake.setWebhookDelivery(WebhookDelivery.MANUAL)
+        fake.payInvoice(page.invoiceId)
+        fake.dropPendingWebhooks { true }
+
+        val inHryvnia =
+            fake
+                .invoice(page.invoiceId)!!
+                .statusJson
+                .replace("\"ccy\":978", "\"ccy\":980")
+        assertThat(inHryvnia).contains("\"ccy\":980")
+        handler.handle(inHryvnia.toByteArray(), fake.signer.sign(inHryvnia), null)
+
+        val held = transactions.findByRecord(page.recordId)!!
+        assertThat(held.state).isEqualTo(TxState.REVIEW)
+        assertThat(settled.map { it.recordId }).doesNotContain(page.recordId)
+    }
 }

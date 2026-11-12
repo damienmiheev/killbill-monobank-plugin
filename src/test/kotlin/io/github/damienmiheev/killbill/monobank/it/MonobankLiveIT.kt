@@ -23,7 +23,9 @@ import org.junit.jupiter.api.TestMethodOrder
  * unless `MONOBANK_ACQUIRING_TEST_TOKEN` is set, so it never runs on pull requests (fork PRs cannot reach the
  * secret). Never use a production token: these tests create and give up small invoices.
  *
- * Run: `MONOBANK_ACQUIRING_TEST_TOKEN=... ./mvnw verify -Dit.test=MonobankLiveIT`
+ * Run: `MONOBANK_TOKEN_IS_TEST=1 MONOBANK_ACQUIRING_TEST_TOKEN=... ./mvnw -Plive verify -Dit.test=MonobankLiveIT`.
+ * `MONOBANK_LIVE_PAY=1` also pays pages by hand (the links are printed); `MONOBANK_LIVE_PAY=auto` lets [LivePayer]
+ * pay them with `MONOBANK_TEST_CARD`, as the live workflow does.
  *
  * Webhooks cannot reach a Kill Bill on this machine, so everything settles the way a lost webhook does: Kill Bill
  * reads the payment with plugin info and the plugin asks monobank.
@@ -41,16 +43,18 @@ class MonobankLiveIT {
     fun start() {
         val fromEnv = System.getenv(TOKEN_ENV)
         assumeTrue(!fromEnv.isNullOrBlank(), "$TOKEN_ENV is not set")
+        // These tests create, pay and refund invoices: never with a production token.
+        check(System.getenv("MONOBANK_TOKEN_IS_TEST") == "1") {
+            "set MONOBANK_TOKEN_IS_TEST=1 to confirm $TOKEN_ENV is a monobank test token"
+        }
         token = fromEnv!!.trim()
         mono = MonobankAcquiring(AcquiringConfig.builder(token).cmsName("killbill-monobank-live-test").build())
         // Merchants with split payments must name a receiver on every basket item.
         val receiver =
-            runCatching {
-                mono.split
-                    .receivers()
-                    .firstOrNull()
-                    ?.id
-            }.getOrNull()
+            mono.split
+                .receivers()
+                .firstOrNull()
+                ?.id
         stack = KillBillStack(liveToken = token)
         stack.start()
         tenant =
@@ -67,9 +71,12 @@ class MonobankLiveIT {
     @AfterAll
     fun stop() {
         if (::stack.isInitialized) {
-            // The merchant token must never reach Kill Bill's logs.
-            assertThat(stack.killbillLogs()).doesNotContain(token)
-            stack.close()
+            try {
+                // The merchant token must never reach Kill Bill's logs.
+                assertThat(stack.killbillLogs()).doesNotContain(token)
+            } finally {
+                stack.close()
+            }
         }
     }
 
@@ -161,6 +168,15 @@ class MonobankLiveIT {
             ?.path("value")
             ?.asText()
 
+    private fun settledInKillBill(paymentId: String): Boolean =
+        stack
+            .payment(tenant, paymentId, withPluginInfo = true)
+            .path("transactions")
+            .first()
+            .path("status")
+            .asText() !=
+            "PENDING"
+
     private fun awaitPaid(
         paymentId: String,
         what: String,
@@ -193,117 +209,164 @@ class MonobankLiveIT {
     @Test
     @Order(10)
     fun `paid pages settle, the saved card pays again, holds are captured and voided, and refunds go through`() {
-        assumeTrue(System.getenv("MONOBANK_LIVE_PAY") == "1", "MONOBANK_LIVE_PAY is not 1")
+        val mode = System.getenv("MONOBANK_LIVE_PAY")
+        assumeTrue(mode == "1" || mode == "auto", "MONOBANK_LIVE_PAY is not 1 or auto")
         val account = stack.createAccount(tenant)
         val pm = stack.addPaymentMethod(tenant, account)
-        val purchase =
-            stack
-                .pay(
-                    tenant,
-                    account,
-                    pm,
-                    "PURCHASE",
-                    "3.00",
-                    properties =
-                        mapOf(
-                            "hosted" to "true",
-                            "saveCard" to "true",
-                        ),
-                ).path("paymentId")
-                .asText()
-        val hold =
-            stack
-                .pay(tenant, account, pm, "AUTHORIZE", "2.00", properties = mapOf("hosted" to "true"))
-                .path("paymentId")
-                .asText()
-        val purchaseUrl = stack.payment(tenant, purchase, withPluginInfo = true).prop("formUrl")
-        val holdUrl = stack.payment(tenant, hold, withPluginInfo = true).prop("formUrl")
-        println("LIVE-PAY 1 (purchase 3.00 UAH, saves the card): $purchaseUrl")
-        println("LIVE-PAY 2 (hold 2.00 UAH): $holdUrl")
+        val purchase = paymentId(stack.pay(tenant, account, pm, "PURCHASE", "3.00", properties = HOSTED_SAVING))
+        val hold = paymentId(stack.pay(tenant, account, pm, "AUTHORIZE", "2.00", properties = HOSTED))
+        payPages(mode, purchase, hold)
 
-        val paid = awaitPaid(purchase, "the purchase page")
-        println("LIVE-RESULT purchase: ${paid.status()}")
-        assertThat(
-            paid
-                .path("transactions")
-                .first()
-                .path("status")
-                .asText(),
-        ).isEqualTo("SUCCESS")
-        val held = awaitPaid(hold, "the hold page")
-        println("LIVE-RESULT hold: ${held.status()}")
-        assertThat(
-            held
-                .path("transactions")
-                .first()
-                .path("status")
-                .asText(),
-        ).isEqualTo("SUCCESS")
-
-        // partial capture of the hosted hold
-        stack.followUp(tenant, hold, "CAPTURE", "1.50")
-        val captured =
-            stack.awaitPayment(tenant, hold, java.time.Duration.ofMinutes(2)) {
-                stack
-                    .payment(tenant, hold, withPluginInfo = true)
-                    .path("capturedAmount")
-                    .decimalValue()
-                    .signum() > 0
-            }
-        println("LIVE-RESULT capture: ${captured.status()} captured=${captured.path("capturedAmount")}")
-        assertThat(captured.path("capturedAmount").decimalValue()).isEqualByComparingTo("1.50")
-
-        // partial, then full refund of the purchase
-        stack.followUp(tenant, purchase, "REFUND", "1.00")
-        stack.awaitPayment(tenant, purchase, java.time.Duration.ofMinutes(3)) {
-            stack
-                .payment(tenant, purchase, withPluginInfo = true)
-                .path("refundedAmount")
-                .decimalValue()
-                .signum() > 0
+        for ((id, what) in listOf(purchase to "purchase", hold to "hold")) {
+            val paid = awaitPaid(id, "the $what page")
+            report(what, paid.status())
+            assertThat(
+                paid
+                    .path("transactions")
+                    .first()
+                    .path("status")
+                    .asText(),
+            ).isEqualTo("SUCCESS")
         }
+        // partial capture of the hosted hold: receipt items for 1.50 (monobank refuses it without them)
+        stack.followUp(tenant, hold, "CAPTURE", "1.50")
+        assertThat(awaitAmount(hold, "capturedAmount", "1.50")).isEqualByComparingTo("1.50")
+        // partial, then the remaining refund of the purchase
+        stack.followUp(tenant, purchase, "REFUND", "1.00")
+        awaitAmount(purchase, "refundedAmount", "1.00")
         stack.followUp(tenant, purchase, "REFUND", "2.00")
-        val refunded =
-            stack.awaitPayment(tenant, purchase, java.time.Duration.ofMinutes(3)) {
-                stack
-                    .payment(tenant, purchase, withPluginInfo = true)
-                    .path("refundedAmount")
-                    .decimalValue()
-                    .compareTo(java.math.BigDecimal("3.00")) == 0
-            }
-        println("LIVE-RESULT refunds: refunded=${refunded.path("refundedAmount")}")
+        assertThat(awaitAmount(purchase, "refundedAmount", "3.00")).isEqualByComparingTo("3.00")
 
-        // the saved card, if monobank saved it for this test merchant
-        val deadline =
-            System.nanoTime() +
-                java.time.Duration
-                    .ofMinutes(4)
-                    .toNanos()
+        savedCard(account, pm)
+    }
+
+    /** The card saved by the first page: a charge refunded in full, a hold captured in full, a hold voided. */
+    private fun savedCard(
+        account: String,
+        pm: String,
+    ) {
+        val card = awaitCardSettled(pm)
+        report("card", card)
+        assumeTrue(card == "ACTIVE", "monobank did not save the card on this test merchant ($card)")
+
+        val renewal = stack.pay(tenant, account, pm, "PURCHASE", "1.00")
+        report("saved-card purchase", renewal.status())
+        assertThat(renewal.status()).isEqualTo("SUCCESS")
+        stack.followUp(tenant, paymentId(renewal), "REFUND", "1.00")
+        assertThat(awaitAmount(paymentId(renewal), "refundedAmount", "1.00")).isEqualByComparingTo("1.00")
+
+        val toCapture = stack.pay(tenant, account, pm, "AUTHORIZE", "1.00")
+        report("saved-card hold", toCapture.status())
+        assertThat(toCapture.status()).isEqualTo("SUCCESS")
+        stack.followUp(tenant, paymentId(toCapture), "CAPTURE", "1.00")
+        assertThat(awaitAmount(paymentId(toCapture), "capturedAmount", "1.00")).isEqualByComparingTo("1.00")
+
+        val toVoid = stack.pay(tenant, account, pm, "AUTHORIZE", "1.00")
+        assertThat(toVoid.status()).isEqualTo("SUCCESS")
+        stack.followUp(tenant, paymentId(toVoid), "VOID")
+        val voided =
+            stack.awaitPayment(tenant, paymentId(toVoid), WAIT) {
+                stack.payment(tenant, paymentId(toVoid), withPluginInfo = true).path("transactions").last().let { tx ->
+                    tx.path("transactionType").asText() == "VOID" && tx.path("status").asText() == "SUCCESS"
+                }
+            }
+        report("void", voided.status())
+
+        otherCurrencyOnSavedCard(account, pm, "EUR")
+        otherCurrencyOnSavedCard(account, pm, "USD")
+    }
+
+    /**
+     * monobank documents no currency limit for saved-card payments or holds: this records what it answers for euro,
+     * so the SDK's fake can match. A refusal is reported, not hidden.
+     */
+    private fun otherCurrencyOnSavedCard(
+        account: String,
+        pm: String,
+        currency: String,
+    ) {
+        val charge = stack.pay(tenant, account, pm, "PURCHASE", "1.00", currency = currency)
+        report(
+            "$currency saved-card purchase",
+            "${charge.status()} ${charge.lastTx().path("gatewayErrorCode").asText()}",
+        )
+        if (charge.status() == "SUCCESS") {
+            stack.followUp(tenant, paymentId(charge), "REFUND", "1.00", currency = currency)
+            report("$currency refund", awaitAmount(paymentId(charge), "refundedAmount", "1.00").toPlainString())
+        }
+        val hold = stack.pay(tenant, account, pm, "AUTHORIZE", "1.00", currency = currency)
+        val tx = hold.lastTx()
+        report(
+            "$currency saved-card hold",
+            "${hold.status()} ${tx.path("gatewayErrorCode").asText()} ${tx.path("gatewayErrorMsg").asText()}",
+        )
+        if (hold.status() == "SUCCESS") stack.followUp(tenant, paymentId(hold), "VOID")
+    }
+
+    private fun JsonNode.lastTx(): JsonNode = path("transactions").last()
+
+    /** By [LivePayer] in the pipeline (`auto`), or by a person who opens the printed links (`1`). */
+    private fun payPages(
+        mode: String,
+        purchase: String,
+        hold: String,
+    ) {
+        val purchaseUrl = stack.payment(tenant, purchase, withPluginInfo = true).prop("formUrl")!!
+        val holdUrl = stack.payment(tenant, hold, withPluginInfo = true).prop("formUrl")!!
+        if (mode != "auto") {
+            println("LIVE-PAY 1 (purchase 3.00 UAH, saves the card): $purchaseUrl")
+            println("LIVE-PAY 2 (hold 2.00 UAH): $holdUrl")
+            return
+        }
+        val card =
+            checkNotNull(LivePayer.TestCard.fromEnv(System.getenv("MONOBANK_TEST_CARD"))) {
+                "MONOBANK_TEST_CARD (number|MM/YY|CVC) is required with MONOBANK_LIVE_PAY=auto"
+            }
+        LivePayer(card).use { payer ->
+            payer.pay(purchaseUrl, "purchase") { settledInKillBill(purchase) }
+            payer.pay(holdUrl, "hold") { settledInKillBill(hold) }
+        }
+    }
+
+    private fun paymentId(payment: JsonNode): String = payment.path("paymentId").asText()
+
+    private fun report(
+        what: String,
+        result: String?,
+    ) = println("LIVE-RESULT $what: $result")
+
+    /** Waits until the payment's [field] (capturedAmount, refundedAmount) reaches [expected]; returns it. */
+    private fun awaitAmount(
+        paymentId: String,
+        field: String,
+        expected: String,
+    ): java.math.BigDecimal {
+        val payment =
+            stack.awaitPayment(tenant, paymentId, WAIT) {
+                stack
+                    .payment(tenant, paymentId, withPluginInfo = true)
+                    .path(field)
+                    .decimalValue()
+                    .compareTo(java.math.BigDecimal(expected)) >= 0
+            }
+        report("$field of $paymentId", payment.path(field).asText())
+        return payment.path(field).decimalValue()
+    }
+
+    private fun awaitCardSettled(pm: String): String? {
+        val deadline = System.nanoTime() + WAIT.multipliedBy(2).toNanos()
         var card = cardStatus(pm)
         while (card != "ACTIVE" && card != "FAILED" && System.nanoTime() < deadline) {
             Thread.sleep(10_000)
             card = cardStatus(pm)
         }
-        println("LIVE-RESULT card: $card")
-        assumeTrue(card == "ACTIVE", "monobank did not save the card on this test merchant ($card)")
-        val renewal = stack.pay(tenant, account, pm, "PURCHASE", "1.00")
-        println("LIVE-RESULT saved-card purchase: ${renewal.status()} ${renewal.prop("invoiceId") ?: ""}")
-        assertThat(renewal.status()).isEqualTo("SUCCESS")
-        val cardHold = stack.pay(tenant, account, pm, "AUTHORIZE", "1.00")
-        println("LIVE-RESULT saved-card hold: ${cardHold.status()}")
-        assertThat(cardHold.status()).isEqualTo("SUCCESS")
-        val holdId = cardHold.path("paymentId").asText()
-        stack.followUp(tenant, holdId, "VOID")
-        val voided =
-            stack.awaitPayment(tenant, holdId, java.time.Duration.ofMinutes(2)) {
-                stack.payment(tenant, holdId, withPluginInfo = true).path("transactions").last().let { tx ->
-                    tx.path("transactionType").asText() == "VOID" && tx.path("status").asText() == "SUCCESS"
-                }
-            }
-        println("LIVE-RESULT void: ${voided.status()}")
+        return card
     }
 
     private companion object {
         const val TOKEN_ENV = "MONOBANK_ACQUIRING_TEST_TOKEN"
+        val HOSTED = mapOf("hosted" to "true")
+        val HOSTED_SAVING = mapOf("hosted" to "true", "saveCard" to "true")
+        val WAIT: java.time.Duration = java.time.Duration.ofMinutes(3)
     }
 }

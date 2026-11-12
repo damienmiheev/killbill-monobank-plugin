@@ -20,6 +20,7 @@ import io.github.damienmiheev.killbill.monobank.reconcile.ReconcileJob
 import io.github.damienmiheev.monobank.testkit.FakeMonobankAcquiring
 import io.github.damienmiheev.monobank.testkit.Fault
 import io.github.damienmiheev.monobank.testkit.MonobankPaths
+import io.github.damienmiheev.monobank.testkit.SplitReceiver
 import io.github.damienmiheev.monobank.testkit.WebhookDelivery
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.AfterAll
@@ -77,6 +78,15 @@ class OperationsIT : ServiceHarness() {
 
         assertThat(refusalCode(payments.capture(op(TransactionType.CAPTURE, account, payment, pm, "10.01"))))
             .isEqualTo(PaymentService.INVALID_OPERATION)
+        // a basket that does not add up is refused before anything is stored or sent
+        val finalizeBefore = fake.requestCount(MonobankPaths.INVOICE_FINALIZE)
+        val badBasket = """[{"name":"A","qty":1,"sum":100,"code":"a"}]"""
+        assertThat(
+            refusalCode(
+                payments.capture(op(TransactionType.CAPTURE, account, payment, pm, "5.00", "basketOrder" to badBasket)),
+            ),
+        ).isEqualTo(PaymentService.INVALID_BASKET)
+        assertThat(fake.requestCount(MonobankPaths.INVOICE_FINALIZE)).isEqualTo(finalizeBefore)
         val usd = op(TransactionType.CAPTURE, account, payment, pm, "5.00").copy(currency = Currency.USD)
         assertThat(refusalCode(payments.capture(usd))).isEqualTo(PaymentService.INVALID_OPERATION)
 
@@ -86,7 +96,7 @@ class OperationsIT : ServiceHarness() {
         assertThat(captured.processedAmountMinor).isEqualTo(600)
         // A merchant with receipts or split payments refuses a partial finalize without items (seen live: 1001).
         val finalize = fake.requests().last { it.path == MonobankPaths.INVOICE_FINALIZE }.body
-        assertThat(finalize).contains("\"items\"", "\"sum\":600", "\"splitReceiverId\":\"rcv-it\"")
+        assertThat(finalize).contains("\"items\"", "\"sum\":600", "\"splitReceiverId\":\"${SplitReceiver.DEFAULT.id}\"")
 
         val cancelCalls = fake.requestCount(MonobankPaths.INVOICE_CANCEL)
         assertThat(refusalCode(payments.capture(op(TransactionType.CAPTURE, account, payment, pm, "1.00"))))
@@ -97,6 +107,11 @@ class OperationsIT : ServiceHarness() {
         assertThat(fake.requestCount(MonobankPaths.INVOICE_CANCEL)).isEqualTo(cancelCalls)
 
         // what was captured can be refunded, in its own currency only and never above the captured amount
+        assertThat(
+            refusalCode(
+                payments.refund(op(TransactionType.REFUND, account, payment, pm, "2.00", "basketOrder" to badBasket)),
+            ),
+        ).isEqualTo(PaymentService.INVALID_BASKET)
         val usdRefund = op(TransactionType.REFUND, account, payment, pm, "1.00").copy(currency = Currency.USD)
         assertThat(refusalCode(payments.refund(usdRefund))).isEqualTo(PaymentService.INVALID_OPERATION)
         assertThat(refusalCode(payments.refund(op(TransactionType.REFUND, account, payment, pm, "6.01"))))
@@ -104,7 +119,7 @@ class OperationsIT : ServiceHarness() {
         val refund = stored(payments.refund(op(TransactionType.REFUND, account, payment, pm, "6.00")))
         assertThat(awaitRow(refund) { it.state.isFinal }.state).isEqualTo(TxState.SUCCESS)
         val cancel = fake.requests().last { it.path == MonobankPaths.INVOICE_CANCEL }.body
-        assertThat(cancel).contains("\"items\"", "\"sum\":600", "\"splitReceiverId\":\"rcv-it\"")
+        assertThat(cancel).contains("\"items\"", "\"sum\":600", "\"splitReceiverId\":\"${SplitReceiver.DEFAULT.id}\"")
     }
 
     @Test

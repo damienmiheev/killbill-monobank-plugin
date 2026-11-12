@@ -47,6 +47,9 @@ class TenantSettings private constructor(
          */
         const val MERCHANT_TOKEN_ENV_PREFIX = "MONOBANK_MERCHANT_TOKEN_"
 
+        /** The only currencies monobank acquiring accepts (checked live: any other ccy gets 1001 "invalid 'ccy'"). */
+        val MONOBANK_CURRENCIES: List<String> = listOf("UAH", "USD", "EUR")
+
         private val LOG = org.slf4j.LoggerFactory.getLogger(TenantSettings::class.java)
         val ALIAS = Regex("[A-Za-z0-9_]{1,64}")
         private val LANGUAGES = setOf("uk", "en")
@@ -167,6 +170,13 @@ class TenantSettings private constructor(
                     } catch (e: InvalidAmountException) {
                         errors += "allowedCurrencies: ${e.message}"
                         null
+                    }
+                }.filter { currency ->
+                    (currency.currencyCode in MONOBANK_CURRENCIES).also { accepted ->
+                        if (!accepted) {
+                            errors += "allowedCurrencies: monobank accepts only " +
+                                "${MONOBANK_CURRENCIES.joinToString()}, not ${currency.currencyCode}"
+                        }
                     }
                 }.toSet()
         }

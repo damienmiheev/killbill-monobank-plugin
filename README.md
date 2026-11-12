@@ -118,7 +118,8 @@ Plugin properties (`pluginProperty=key=value` on Kill Bill's payment calls):
 | `initiationKind=client` | A saved-card charge made with the customer present (default `merchant`). |
 
 Transactions return `formUrl`, `tdsUrl` (3-D Secure), `invoiceId`, `expiresAt`, `callerRef` and `reference` as plugin
-properties. Holds (AUTHORIZE) are UAH only, as monobank allows.
+properties. Holds (AUTHORIZE) on a payment page are UAH only, as monobank enforces; a saved-card hold in
+another currency is sent and monobank decides.
 
 Routes under `/plugins/killbill-monobank/`:
 

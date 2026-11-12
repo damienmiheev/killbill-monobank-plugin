@@ -20,6 +20,7 @@ import io.github.damienmiheev.killbill.monobank.reconcile.ReconcileJob
 import io.github.damienmiheev.monobank.testkit.FakeMonobankAcquiring
 import io.github.damienmiheev.monobank.testkit.Fault
 import io.github.damienmiheev.monobank.testkit.MonobankPaths
+import io.github.damienmiheev.monobank.testkit.SplitReceiver
 import io.github.damienmiheev.monobank.testkit.WebhookDelivery
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.AfterAll
@@ -90,7 +91,14 @@ abstract class ServiceHarness {
         ds.connection.use { c ->
             c.createStatement().use { it.execute(Files.readString(Path.of(System.getProperty("plugin.ddl")))) }
         }
-        fake = FakeMonobankAcquiring().start()
+        fake =
+            FakeMonobankAcquiring
+                .builder()
+                // like monobank's test merchant: receipts and split payments on
+                .fiscalization(true)
+                .splitPayments(true)
+                .build()
+                .start()
         receiver = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         receiver.createContext("/hook") { exchange ->
             val result =
@@ -179,8 +187,8 @@ abstract class ServiceHarness {
             """
             org.killbill.billing.plugin.monobank.merchantToken=env:it
             org.killbill.billing.plugin.monobank.webhookUrl=http://127.0.0.1:${receiver.address.port}/hook
-            org.killbill.billing.plugin.monobank.allowedCurrencies=UAH,USD
-            org.killbill.billing.plugin.monobank.splitReceiverId=rcv-it
+            org.killbill.billing.plugin.monobank.allowedCurrencies=UAH,EUR,USD
+            org.killbill.billing.plugin.monobank.splitReceiverId=${SplitReceiver.DEFAULT.id}
             """.trimIndent()
         return TenantSettingsProvider(
             readRaw = { config },
