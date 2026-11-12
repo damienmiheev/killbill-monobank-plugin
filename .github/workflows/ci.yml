@@ -114,8 +114,9 @@ jobs:
           big=$(git ls-files -z | xargs -0 -r stat --printf '%s\t%n\n' | awk -F '\t' '$1 > 5242880 { print $2 }')
           if [ -n "$bad$big" ]; then printf 'Not allowed in the repository:\n%s\n%s\n' "$bad" "$big"; exit 1; fi
 
-  # New dependencies with known vulnerabilities or incompatible licences fail the PR. It compares against the full
-  # resolved tree that dependency-graph.yml submits from main; a PR's own changes are seen as declared in pom.xml.
+  # New dependencies with known vulnerabilities or incompatible licences fail the PR. Only what the PR adds is checked,
+  # as declared in pom.xml: transitive and parent-managed versions are not seen here (dependency-graph.yml submits the
+  # full tree from main, for Dependabot alerts).
   dependency-review:
     name: dependency-review
     if: github.event_name == 'pull_request'

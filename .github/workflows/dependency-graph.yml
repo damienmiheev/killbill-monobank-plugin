@@ -1,8 +1,8 @@
 name: Dependency graph
 
 # GitHub's static Maven graph sees only what pom.xml declares. This submits the full resolved tree (transitive
-# dependencies and versions inherited from Kill Bill's parent) from main, so Dependabot alerts and dependency
-# review cover everything the bundle embeds and the build uses.
+# dependencies and versions inherited from Kill Bill's parent) from main, so Dependabot alerts cover everything the
+# bundle embeds and the build uses. Never add a pull_request trigger: the token with contents: write reaches Maven.
 on:
   push:
     branches: [main]
@@ -38,3 +38,5 @@ jobs:
       - uses: advanced-security/maven-dependency-submission-action@a64327a7329c9939cf675e458452febe1894a70c # v6.0.1
         with:
           maven-args: -B -ntp
+          # Fixed, so renaming the workflow or job does not start a new snapshot series and leave the old one stale.
+          correlator: maven-dependency-graph
