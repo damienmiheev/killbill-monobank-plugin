@@ -1,0 +1,941 @@
+/*
+ * Copyright 2026 Dmytro Mikhieiev
+ * SPDX-License-Identifier: Apache-2.0
+ */
+package io.github.damienmiheev.killbill.monobank.core
+
+import io.github.damienmiheev.killbill.monobank.config.TenantSettings
+import io.github.damienmiheev.killbill.monobank.config.TenantSettingsProvider
+import io.github.damienmiheev.killbill.monobank.crypto.CardTokenCipher
+import io.github.damienmiheev.killbill.monobank.crypto.CardTokenUnreadableException
+import io.github.damienmiheev.killbill.monobank.db.CardStatus
+import io.github.damienmiheev.killbill.monobank.db.Claim
+import io.github.damienmiheev.killbill.monobank.db.NewTx
+import io.github.damienmiheev.killbill.monobank.db.PaymentMethodDao
+import io.github.damienmiheev.killbill.monobank.db.PmRow
+import io.github.damienmiheev.killbill.monobank.db.TransactionDao
+import io.github.damienmiheev.killbill.monobank.db.TxChange
+import io.github.damienmiheev.killbill.monobank.db.TxRow
+import io.github.damienmiheev.killbill.monobank.db.TxState
+import io.github.damienmiheev.killbill.monobank.money.InvalidAmountException
+import io.github.damienmiheev.killbill.monobank.money.Money
+import io.github.damienmiheev.killbill.monobank.mono.MonobankClients
+import io.github.damienmiheev.monobank.acquiring.MonobankAcquiring
+import io.github.damienmiheev.monobank.acquiring.common.AcquiringErrorCodes
+import io.github.damienmiheev.monobank.acquiring.common.BasketItem
+import io.github.damienmiheev.monobank.acquiring.common.InitiationKind
+import io.github.damienmiheev.monobank.acquiring.common.InvoiceStatus
+import io.github.damienmiheev.monobank.acquiring.common.MerchantPaymInfo
+import io.github.damienmiheev.monobank.acquiring.common.OperationStatus
+import io.github.damienmiheev.monobank.acquiring.common.PaymentType
+import io.github.damienmiheev.monobank.acquiring.common.SaveCardData
+import io.github.damienmiheev.monobank.acquiring.invoice.CancelInvoiceRequest
+import io.github.damienmiheev.monobank.acquiring.invoice.CreateInvoiceRequest
+import io.github.damienmiheev.monobank.acquiring.invoice.FinalizeInvoiceRequest
+import io.github.damienmiheev.monobank.acquiring.invoice.InvoiceStatusResponse
+import io.github.damienmiheev.monobank.acquiring.invoice.PaymentResponse
+import io.github.damienmiheev.monobank.acquiring.wallet.WalletPaymentRequest
+import io.github.damienmiheev.monobank.core.MonobankApiException
+import io.github.damienmiheev.monobank.core.MonobankAuthException
+import io.github.damienmiheev.monobank.core.MonobankException
+import io.github.damienmiheev.monobank.core.RequestOutcome
+import org.killbill.billing.catalog.api.Currency
+import org.killbill.billing.payment.api.TransactionType
+import org.slf4j.LoggerFactory
+import java.math.BigDecimal
+import java.time.Duration
+import java.time.Instant
+import java.util.UUID
+
+/** One Kill Bill payment operation, as the plugin API receives it. */
+data class Operation(
+    val type: TransactionType,
+    val tenantId: UUID,
+    val accountId: UUID,
+    val paymentId: UUID,
+    val transactionId: UUID,
+    val paymentMethodId: UUID?,
+    val amount: BigDecimal?,
+    val currency: Currency?,
+    val properties: Properties,
+)
+
+/** What the plugin answers Kill Bill: either a stored row or a refusal that never reached monobank. */
+sealed interface Answer {
+    data class Stored(
+        val row: TxRow,
+    ) : Answer
+
+    data class Refused(
+        val op: Operation,
+        val code: String,
+        val message: String,
+        /** A decline of the payment (PAYMENT_FAILURE) rather than a plugin problem (PLUGIN_FAILURE). */
+        val decline: Boolean = false,
+    ) : Answer
+}
+
+/**
+ * The payment logic of design A4–A7: one monobank operation per Kill Bill transaction, idempotent by the
+ * transaction id, never reporting an unknown outcome as failed, and moving rows only forward.
+ */
+@Suppress("TooManyFunctions", "LargeClass")
+class PaymentService(
+    private val transactions: TransactionDao,
+    private val paymentMethods: PaymentMethodDao,
+    private val clients: MonobankClients,
+    private val tenants: TenantSettingsProvider,
+    private val cipher: CardTokenCipher,
+    private val metrics: PluginMetrics,
+    private val now: () -> Instant,
+) {
+    // ---- charges --------------------------------------------------------------------------------------------
+
+    /** PURCHASE or AUTHORIZE: hosted page when the caller asks for it, otherwise the saved card. */
+    fun charge(op: Operation): Answer {
+        // Kill Bill may call again for the same transaction (a retry, PUT /payments/{id}): never charge twice.
+        transactions.findByTransaction(op.transactionId)?.let { return Answer.Stored(refreshIfOpen(it)) }
+        val plan =
+            when (val checked = checkCharge(op)) {
+                is ChargeRefusal -> return checked.answer
+                is ChargePlan -> checked
+            }
+        val row =
+            when (val claim = transactions.claim(plan.newTx(op))) {
+                is Claim.Existing -> return Answer.Stored(refreshIfOpen(claim.row))
+
+                Claim.Unresolved -> return refused(
+                    op,
+                    PREVIOUS_CHARGE_UNRESOLVED,
+                    "an earlier charge on this account is unresolved",
+                )
+
+                is Claim.Claimed -> claim.row
+            }
+        val client = clients.forToken(plan.settings.merchantToken)
+        val info =
+            MerchantPaymInfo
+                .builder()
+                .reference(row.reference.toString())
+                .destination(plan.destination)
+                .basketOrder(plan.basket)
+                .build()
+        return Answer.Stored(
+            if (plan.hosted) {
+                createHosted(row, plan.money, plan.settings, op, client, info)
+            } else {
+                chargeSavedCard(row, plan.card!!, plan.money, plan.settings, op, client, info)
+            },
+        )
+    }
+
+    private sealed interface ChargeCheck
+
+    private class ChargeRefusal(
+        val answer: Answer,
+    ) : ChargeCheck
+
+    /** A checked charge, ready to claim. */
+    private class ChargePlan(
+        val settings: TenantSettings,
+        val money: Money,
+        val destination: String,
+        val basket: List<BasketItem>?,
+        val hosted: Boolean,
+        val card: PmRow?,
+    ) : ChargeCheck {
+        fun newTx(op: Operation): NewTx =
+            NewTx(
+                tenantId = op.tenantId,
+                accountId = op.accountId,
+                paymentId = op.paymentId,
+                paymentMethodId = op.paymentMethodId,
+                invoiceKbId = op.properties.uuid(Properties.KB_INVOICE_ID),
+                transactionId = op.transactionId,
+                type = op.type,
+                callerRef = op.properties.string(Properties.CALLER_REF),
+                invoiceId = null,
+                amountMinor = money.minor,
+                currency = money.currency.currencyCode,
+                saveCard = hosted && op.properties.flag(Properties.SAVE_CARD),
+            )
+    }
+
+    /** Every refusal of a charge before anything is stored or sent: a [ChargePlan] or the refusal [Answer]. */
+    private fun checkCharge(op: Operation): ChargeCheck {
+        val settings =
+            settings(op)
+                ?: return ChargeRefusal(refused(op, CONFIG_INVALID, "the tenant's monobank settings are not valid"))
+        val money =
+            money(op, settings) ?: return ChargeRefusal(refused(op, INVALID_AMOUNT, "amount or currency not allowed"))
+        if (op.type == TransactionType.AUTHORIZE && money.currency.currencyCode != UAH) {
+            return ChargeRefusal(refused(op, INVALID_AMOUNT, "monobank holds work only in UAH"))
+        }
+        val destination = op.properties.string(Properties.DESTINATION) ?: settings.destination ?: DEFAULT_DESTINATION
+        val basket =
+            try {
+                Baskets.fromProperty(op.properties.string(Properties.BASKET_ORDER), money.minor)
+                    ?: Baskets.single(settings, destination, money.minor)
+            } catch (e: IllegalArgumentException) {
+                return ChargeRefusal(refused(op, INVALID_BASKET, e.message ?: "invalid basketOrder"))
+            }
+        val hosted = op.properties.flag(Properties.HOSTED)
+        val card = op.paymentMethodId?.let(paymentMethods::find)
+        if (!hosted && (card == null || card.cardStatus != CardStatus.ACTIVE)) {
+            return ChargeRefusal(
+                refused(op, NO_ACTIVE_CARD, "the payment method has no saved card; use hosted=true", decline = true),
+            )
+        }
+        return ChargePlan(settings, money, destination, basket, hosted, card)
+    }
+
+    private fun createHosted(
+        row: TxRow,
+        money: Money,
+        settings: TenantSettings,
+        op: Operation,
+        client: MonobankAcquiring,
+        info: MerchantPaymInfo,
+    ): TxRow {
+        val validity = op.properties.long(Properties.VALIDITY_SECONDS) ?: settings.checkoutValiditySeconds
+        val request =
+            CreateInvoiceRequest
+                .builder(money.minor)
+                .ccy(money.numericCode)
+                .merchantPaymInfo(info)
+                .redirectUrl(op.properties.string(Properties.REDIRECT_URL) ?: settings.redirectUrl?.toString())
+                .webHookUrl(settings.webhookUrl.toString())
+                .validity(validity)
+                .paymentType(if (row.type == TransactionType.AUTHORIZE) PaymentType.HOLD else PaymentType.DEBIT)
+                .saveCardData(
+                    if (row.saveCard) {
+                        SaveCardData.saveTo(walletId(row))
+                    } else {
+                        null
+                    },
+                ).build()
+        return call(row) {
+            val created = client.invoices.create(request)
+            if (row.saveCard &&
+                row.paymentMethodId != null
+            ) {
+                paymentMethods.markPending(row.paymentMethodId, created.invoiceId)
+            }
+            TxChange(
+                state = TxState.PENDING,
+                invoiceId = created.invoiceId,
+                monoStatus = InvoiceStatus.CREATED.value,
+                formUrl = created.pageUrl,
+                expiresAt = now().plusSeconds(validity),
+                nextCheckAt = now().plusSeconds(validity).plus(EXPIRY_MARGIN),
+            )
+        }
+    }
+
+    private fun chargeSavedCard(
+        row: TxRow,
+        pm: PmRow,
+        money: Money,
+        settings: TenantSettings,
+        op: Operation,
+        client: MonobankAcquiring,
+        info: MerchantPaymInfo,
+    ): TxRow {
+        val token =
+            try {
+                cipher.open(
+                    CardTokenCipher.Sealed(pm.tokenKeyId!!, pm.tokenCiphertext!!),
+                    pm.tenantId,
+                    pm.paymentMethodId,
+                )
+            } catch (e: CardTokenUnreadableException) {
+                LOG.error("Card token of payment method {} cannot be read: {}", pm.paymentMethodId, e.message)
+                return transactions.transition(
+                    row.recordId,
+                    setOf(TxState.SENDING),
+                    TxChange(
+                        TxState.CANCELED,
+                        errorCode = CARD_UNREADABLE,
+                        errorMessage = "the saved card cannot be read",
+                    ),
+                )
+            }
+        val initiation =
+            if (op.properties.string(Properties.INITIATION_KIND).equals("client", ignoreCase = true)) {
+                InitiationKind.CLIENT
+            } else {
+                InitiationKind.MERCHANT
+            }
+        val request =
+            WalletPaymentRequest
+                .builder(token, money.minor, money.numericCode, initiation)
+                .merchantPaymInfo(info)
+                .webHookUrl(settings.webhookUrl.toString())
+                .redirectUrl(op.properties.string(Properties.REDIRECT_URL) ?: settings.redirectUrl?.toString())
+                .paymentType(if (row.type == TransactionType.AUTHORIZE) PaymentType.HOLD else PaymentType.DEBIT)
+                .build()
+        return call(row, onRejected = { e -> if (e.errorCode == AcquiringErrorCodes.TOKEN_NOT_FOUND) retireCard(pm) }) {
+            paymentChange(row, client.wallet.payment(request))
+        }
+    }
+
+    private fun paymentChange(
+        row: TxRow,
+        response: PaymentResponse,
+    ): TxChange {
+        val change =
+            when (response.status) {
+                OperationStatus.SUCCESS -> {
+                    TxChange(TxState.SUCCESS, processedAmountMinor = response.amount, settled = true)
+                }
+
+                OperationStatus.FAILURE -> {
+                    TxChange(
+                        TxState.FAILED,
+                        errorCode = DECLINED,
+                        errorMessage = response.failureReason,
+                        settled = true,
+                    )
+                }
+
+                else -> {
+                    TxChange(
+                        TxState.PENDING,
+                        tdsUrl = response.tdsUrl,
+                        expiresAt = response.tdsUrl?.let { now().plus(THREE_DS_VALIDITY) },
+                        nextCheckAt = now().plus(FIRST_CHECK),
+                    )
+                }
+            }
+        return change
+            .copy(
+                invoiceId = response.invoiceId,
+                monoStatus = response.statusRaw,
+                monoModifiedAt = response.modifiedDate?.toInstant(),
+            ).let {
+                if (response.amount !=
+                    row.amountMinor
+                ) {
+                    review(row, "amount ${response.amount} != ${row.amountMinor}")
+                } else {
+                    it
+                }
+            }
+    }
+
+    private fun retireCard(pm: PmRow) {
+        paymentMethods.setStatus(pm.paymentMethodId, CardStatus.FAILED, setOf(CardStatus.ACTIVE))
+        LOG.warn("monobank no longer knows the card of payment method {}; it is retired", pm.paymentMethodId)
+    }
+
+    // ---- capture, void, refund ------------------------------------------------------------------------------
+
+    /** A follow-up operation on an existing charge: what to send, or why not. */
+    private sealed interface FollowUp {
+        data class Refuse(
+            val code: String,
+            val message: String,
+        ) : FollowUp
+
+        class Send(
+            val money: Money,
+            val invoiceId: String,
+            val call: (TxRow, MonobankAcquiring) -> TxChange,
+        ) : FollowUp
+    }
+
+    fun capture(op: Operation): Answer =
+        followUp(op) { settings ->
+            val money =
+                money(op, settings) ?: return@followUp FollowUp.Refuse(INVALID_AMOUNT, "amount or currency not allowed")
+            val rows = transactions.findByPayment(op.paymentId)
+            val auth = rows.firstOrNull { it.type == TransactionType.AUTHORIZE }
+            val refusal =
+                when {
+                    auth == null || auth.state != TxState.SUCCESS || auth.invoiceId == null -> NO_HOLD
+
+                    rows.any {
+                        it.type == TransactionType.CAPTURE && it.state != TxState.CANCELED
+                    } -> "monobank captures a hold only once"
+
+                    auth.currency != money.currency.currencyCode -> "capture currency differs from the authorization"
+
+                    money.minor > auth.amountMinor -> "capture amount is above the hold"
+
+                    auth.createdAt
+                        .plus(
+                            HOLD_LIFETIME,
+                        ).isBefore(now()) -> "the hold has lapsed (monobank keeps it 9 days)"
+
+                    else -> null
+                }
+            if (refusal != null) return@followUp FollowUp.Refuse(INVALID_OPERATION, refusal)
+            FollowUp.Send(money, auth!!.invoiceId!!) { _, client ->
+                val response =
+                    client.invoices.finalize(
+                        FinalizeInvoiceRequest.builder(auth.invoiceId, money.minor).build(),
+                    )
+                operationChange(response.status, response.statusRaw, money.minor)
+            }
+        }
+
+    fun void(op: Operation): Answer =
+        followUp(op) { _ ->
+            val rows = transactions.findByPayment(op.paymentId)
+            val auth = rows.firstOrNull { it.type == TransactionType.AUTHORIZE }
+            val captured =
+                rows.any {
+                    it.type == TransactionType.CAPTURE && it.state != TxState.FAILED &&
+                        it.state != TxState.CANCELED
+                }
+            val refusal =
+                when {
+                    rows.any { it.type == TransactionType.PURCHASE } -> "a purchase cannot be voided; use a refund"
+                    auth == null || auth.state != TxState.SUCCESS || auth.invoiceId == null -> NO_HOLD
+                    captured -> "the authorization was captured; use a refund"
+                    else -> null
+                }
+            if (refusal != null) return@followUp FollowUp.Refuse(INVALID_OPERATION, refusal)
+            FollowUp.Send(Money(auth!!.amountMinor, Money.currency(auth.currency)), auth.invoiceId!!) { row, client ->
+                val response =
+                    client.invoices.cancel(
+                        CancelInvoiceRequest.builder(auth.invoiceId).extRef(row.reference.toString()).build(),
+                    )
+                operationChange(response.status, response.statusRaw, auth.amountMinor)
+            }
+        }
+
+    fun refund(op: Operation): Answer =
+        followUp(op) { settings ->
+            val money =
+                money(op, settings) ?: return@followUp FollowUp.Refuse(INVALID_AMOUNT, "amount or currency not allowed")
+            val rows = transactions.findByPayment(op.paymentId)
+            val charge =
+                rows.firstOrNull { it.type == TransactionType.PURCHASE && it.state == TxState.SUCCESS }
+                    ?: rows.firstOrNull { it.type == TransactionType.CAPTURE && it.state == TxState.SUCCESS }
+            val refundable = charge?.let { it.processedAmountMinor ?: it.amountMinor } ?: 0L
+            val refunded =
+                rows
+                    .filter {
+                        it.type == TransactionType.REFUND && it.state in REFUND_COUNTS
+                    }.sumOf { it.amountMinor }
+            val refusal =
+                when {
+                    charge?.invoiceId == null -> "there is no successful charge to refund"
+                    charge.currency != money.currency.currencyCode -> "refund currency differs from the charge"
+                    money.minor > refundable - refunded -> "refund is above what is left to refund"
+                    else -> null
+                }
+            if (refusal != null) return@followUp FollowUp.Refuse(INVALID_OPERATION, refusal)
+            val full = money.minor == refundable && refunded == 0L
+            FollowUp.Send(money, charge!!.invoiceId!!) { row, client ->
+                val builder = CancelInvoiceRequest.builder(charge.invoiceId).extRef(row.reference.toString())
+                if (!full) builder.amount(money.minor)
+                val response = client.invoices.cancel(builder.build())
+                operationChange(response.status, response.statusRaw, money.minor)
+            }
+        }
+
+    /** Idempotency, settings, the plan, the claim and the single call, shared by capture, void and refund. */
+    private fun followUp(
+        op: Operation,
+        plan: (TenantSettings) -> FollowUp,
+    ): Answer {
+        transactions.findByTransaction(op.transactionId)?.let { return Answer.Stored(refreshIfOpen(it)) }
+        val settings =
+            settings(op) ?: return refused(op, CONFIG_INVALID, "the tenant's monobank settings are not valid")
+        return when (val next = plan(settings)) {
+            is FollowUp.Refuse -> {
+                refused(op, next.code, next.message)
+            }
+
+            is FollowUp.Send -> {
+                val row = claimFollowUp(op, next.money, next.invoiceId)
+                when {
+                    row == null -> refused(op, PREVIOUS_OPERATION_UNRESOLVED, UNRESOLVED_MESSAGE)
+                    row.state != TxState.SENDING -> Answer.Stored(refreshIfOpen(row))
+                    else -> Answer.Stored(call(row) { next.call(row, clients.forToken(settings.merchantToken)) })
+                }
+            }
+        }
+    }
+
+    private fun claimFollowUp(
+        op: Operation,
+        money: Money,
+        invoiceId: String?,
+    ): TxRow? =
+        when (
+            val claim =
+                transactions.claim(
+                    NewTx(
+                        tenantId = op.tenantId,
+                        accountId = op.accountId,
+                        paymentId = op.paymentId,
+                        paymentMethodId = op.paymentMethodId,
+                        invoiceKbId = null,
+                        transactionId = op.transactionId,
+                        type = op.type,
+                        callerRef = op.properties.string(Properties.CALLER_REF),
+                        invoiceId = invoiceId,
+                        amountMinor = money.minor,
+                        currency = money.currency.currencyCode,
+                        saveCard = false,
+                    ),
+                )
+        ) {
+            is Claim.Claimed -> claim.row
+            is Claim.Existing -> claim.row
+            Claim.Unresolved -> null
+        }
+
+    private fun operationChange(
+        status: OperationStatus,
+        raw: String,
+        processed: Long,
+    ): TxChange =
+        when (status) {
+            OperationStatus.SUCCESS -> {
+                TxChange(
+                    TxState.SUCCESS,
+                    monoStatus = raw,
+                    processedAmountMinor = processed,
+                    settled = true,
+                )
+            }
+
+            OperationStatus.FAILURE -> {
+                TxChange(TxState.FAILED, monoStatus = raw, errorCode = DECLINED, settled = true)
+            }
+
+            else -> {
+                TxChange(TxState.PENDING, monoStatus = raw, nextCheckAt = now().plus(FIRST_CHECK))
+            }
+        }
+
+    // ---- giving up an unpaid hosted page -----------------------------------------------------------------------
+
+    /** What happened to a request to give up a hosted payment page (design A7, `POST /payments/{id}/cancel`). */
+    sealed interface Cancellation {
+        data class Done(
+            val row: TxRow,
+        ) : Cancellation
+
+        /** The customer paid (or is paying): nothing was cancelled, the payment settles as paid. */
+        data class AlreadyPaid(
+            val row: TxRow,
+        ) : Cancellation
+
+        data object NotFound : Cancellation
+
+        data class Unavailable(
+            val reason: String,
+        ) : Cancellation
+    }
+
+    /** Removes monobank's invoice of an unpaid hosted payment; monobank refuses when the customer has paid. */
+    fun cancelHosted(
+        paymentId: UUID,
+        tenantId: UUID,
+    ): Cancellation {
+        val row =
+            transactions
+                .findByPayment(paymentId)
+                .firstOrNull { it.tenantId == tenantId && it.formUrl != null && it.invoiceId != null }
+                ?: return Cancellation.NotFound
+        val settings =
+            (tenants.get(tenantId) as? TenantSettings.ParseResult.Valid)?.settings
+                ?: return Cancellation.Unavailable("the tenant's monobank settings are not valid")
+        if (row.state.isFinal || row.state == TxState.REVIEW) return outcomeOf(row)
+        val client = clients.forToken(settings.merchantToken)
+        try {
+            client.invoices.remove(row.invoiceId!!)
+        } catch (e: MonobankApiException) {
+            if (e.outcome != RequestOutcome.REJECTED) return Cancellation.Unavailable("monobank did not answer")
+            LOG.info("monobank refused to remove invoice {} ({}): it is paid or being paid", row.invoiceId, e.errorCode)
+        } catch (e: MonobankException) {
+            return Cancellation.Unavailable("monobank did not answer (${e.outcome})")
+        }
+        val status =
+            try {
+                client.invoices.status(row.invoiceId!!)
+            } catch (e: MonobankException) {
+                return Cancellation.Unavailable("monobank did not answer (${e.outcome})")
+            }
+        apply(status, tenantId)
+        return outcomeOf(transactions.findByRecord(row.recordId)!!)
+    }
+
+    private fun outcomeOf(row: TxRow): Cancellation =
+        when (row.state) {
+            TxState.FAILED, TxState.CANCELED -> Cancellation.Done(row)
+            else -> Cancellation.AlreadyPaid(row)
+        }
+
+    // ---- calling monobank -----------------------------------------------------------------------------------
+
+    /**
+     * Calls monobank once for a claimed (SENDING) row and records the result (design A4 step 3–4). An outcome that
+     * may have reached monobank becomes UNKNOWN, never FAILED; a request that was not sent becomes CANCELED.
+     */
+    private fun call(
+        row: TxRow,
+        onRejected: (MonobankApiException) -> Unit = {},
+        block: () -> TxChange,
+    ): TxRow {
+        val change =
+            try {
+                block().also { metrics.lastMonobankCall.set(now()) }
+            } catch (e: MonobankException) {
+                failureChange(e).also {
+                    if (e is MonobankApiException &&
+                        e.outcome == RequestOutcome.REJECTED
+                    ) {
+                        onRejected(e)
+                    }
+                }
+            }
+        return transactions.transition(row.recordId, TxState.OPEN, change)
+    }
+
+    private fun failureChange(e: MonobankException): TxChange =
+        when (e.outcome ?: RequestOutcome.UNKNOWN) {
+            RequestOutcome.NOT_SENT -> {
+                TxChange(
+                    TxState.CANCELED,
+                    errorCode = NOT_SENT,
+                    errorMessage = "monobank could not be reached",
+                    settled = true,
+                )
+            }
+
+            RequestOutcome.REJECTED -> {
+                val api = e as? MonobankApiException
+                val code = api?.errorCode ?: REJECTED
+                val decline = code in DECLINE_CODES
+                if (e is MonobankAuthException) {
+                    LOG.error(
+                        "monobank refused the merchant token (403): check the tenant's settings",
+                    )
+                }
+                TxChange(
+                    if (decline) TxState.FAILED else TxState.CANCELED,
+                    errorCode = code,
+                    errorMessage = api?.errorText ?: e.message,
+                    settled = true,
+                )
+            }
+
+            RequestOutcome.UNKNOWN -> {
+                LOG.warn(
+                    "monobank call outcome unknown ({}); the transaction stays UNKNOWN until monobank tells",
+                    e.javaClass.simpleName,
+                )
+                TxChange(TxState.UNKNOWN, errorCode = OUTCOME_UNKNOWN, nextCheckAt = now().plus(FIRST_CHECK))
+            }
+        }
+
+    // ---- reading monobank's state ---------------------------------------------------------------------------
+
+    /** Refreshes an open row that has a monobank invoice from `invoice/status`; returns the row as stored now. */
+    fun refreshIfOpen(row: TxRow): TxRow {
+        if (row.state !in TxState.OPEN || row.invoiceId == null) return row
+        val settings = (tenants.get(row.tenantId) as? TenantSettings.ParseResult.Valid)?.settings ?: return row
+        val status =
+            try {
+                clients.forToken(settings.merchantToken).invoices.status(row.invoiceId)
+            } catch (e: MonobankException) {
+                LOG.info("Could not refresh invoice {} from monobank: {}", row.invoiceId, e.outcome)
+                return row
+            }
+        apply(status, row.tenantId)
+        return transactions.findByRecord(row.recordId)!!
+    }
+
+    /** What applying one monobank invoice status changed. */
+    data class Applied(
+        /** Rows that are final now and were not SENDING before (their Kill Bill transaction can be settled). */
+        val toSettle: List<TxRow>,
+        val matched: Boolean,
+    )
+
+    /**
+     * Applies an invoice status (from a webhook or a poll) to every row of that invoice, the card it saved and its
+     * refunds, each part on its own and only forward (design A7 step 6).
+     */
+    fun apply(
+        status: InvoiceStatusResponse,
+        tenantId: UUID,
+    ): Applied {
+        val rows = transactions.findByInvoice(status.invoiceId).filter { it.tenantId == tenantId }
+        val byReference =
+            status.reference
+                ?.let { ref ->
+                    runCatching { UUID.fromString(ref) }.getOrNull()
+                }?.let(transactions::findByReference)
+        val charge =
+            rows.firstOrNull { it.type == TransactionType.PURCHASE || it.type == TransactionType.AUTHORIZE }
+                ?: byReference?.takeIf {
+                    it.tenantId == tenantId &&
+                        (it.invoiceId == null || it.invoiceId == status.invoiceId)
+                }
+        if (charge == null) return Applied(emptyList(), matched = false)
+        val toSettle = mutableListOf<TxRow>()
+        val before = charge.state
+        val after = transactions.transition(charge.recordId, TxState.OPEN, chargeChange(charge, status))
+        if (after.state.isFinal && before != TxState.SENDING && after.state != before) toSettle += after
+        applyCapture(rows, status, toSettle)
+        applyCancels(rows, status, toSettle)
+        applyCard(status, tenantId)
+        return Applied(toSettle, matched = true)
+    }
+
+    private fun chargeChange(
+        row: TxRow,
+        status: InvoiceStatusResponse,
+    ): TxChange {
+        val base =
+            TxChange(
+                state = row.state,
+                invoiceId = status.invoiceId,
+                monoStatus = status.statusRaw,
+                monoModifiedAt = status.modifiedDate?.toInstant(),
+            )
+        val paidState = if (row.type == TransactionType.AUTHORIZE) InvoiceStatus.HOLD else InvoiceStatus.SUCCESS
+        val target =
+            when (status.status) {
+                // A hold already captured (SUCCESS) or released (REVERSED) when first seen was held:
+                // the AUTHORIZE succeeded.
+                paidState, InvoiceStatus.SUCCESS, InvoiceStatus.REVERSED -> {
+                    if (!sameMoney(
+                            row,
+                            status,
+                        )
+                    ) {
+                        return review(
+                            row,
+                            "monobank reports ${status.amount}/${status.ccy}",
+                        ).copy(invoiceId = status.invoiceId)
+                    }
+                    base.copy(state = TxState.SUCCESS, processedAmountMinor = status.amount)
+                }
+
+                InvoiceStatus.FAILURE -> {
+                    base.copy(
+                        state = TxState.FAILED,
+                        errorCode = status.errCode ?: DECLINED,
+                        errorMessage = status.failureReason,
+                    )
+                }
+
+                InvoiceStatus.EXPIRED -> {
+                    base.copy(
+                        state = TxState.FAILED,
+                        errorCode = EXPIRED,
+                        errorMessage = "the payment page expired unpaid",
+                    )
+                }
+
+                InvoiceStatus.HOLD -> {
+                    review(row, "a purchase invoice is held")
+                }
+
+                else -> {
+                    base.copy(state = TxState.PENDING, nextCheckAt = row.nextCheckAt ?: now().plus(FIRST_CHECK))
+                }
+            }
+        return target
+    }
+
+    private fun applyCapture(
+        rows: List<TxRow>,
+        status: InvoiceStatusResponse,
+        toSettle: MutableList<TxRow>,
+    ) {
+        val capture = rows.firstOrNull { it.type == TransactionType.CAPTURE && it.state in TxState.OPEN } ?: return
+        val change =
+            when (status.status) {
+                InvoiceStatus.SUCCESS -> {
+                    TxChange(
+                        TxState.SUCCESS,
+                        processedAmountMinor =
+                            status.finalAmount ?: capture.amountMinor,
+                    )
+                }
+
+                InvoiceStatus.REVERSED, InvoiceStatus.FAILURE -> {
+                    TxChange(TxState.FAILED, errorCode = "HOLD_RELEASED")
+                }
+
+                else -> {
+                    return
+                }
+            }
+        settleLater(capture, change, toSettle)
+    }
+
+    private fun applyCancels(
+        rows: List<TxRow>,
+        status: InvoiceStatusResponse,
+        toSettle: MutableList<TxRow>,
+    ) {
+        val ours = rows.filter { it.type == TransactionType.REFUND || it.type == TransactionType.VOID }
+        for (row in ours.filter { it.state in TxState.OPEN }) {
+            val item = status.cancelFor(row.reference.toString()) ?: continue
+            val change =
+                when (item.status) {
+                    OperationStatus.SUCCESS -> {
+                        TxChange(
+                            TxState.SUCCESS,
+                            monoStatus = item.statusRaw,
+                            processedAmountMinor = item.amount,
+                        )
+                    }
+
+                    OperationStatus.FAILURE -> {
+                        TxChange(
+                            TxState.FAILED,
+                            monoStatus = item.statusRaw,
+                            errorCode = DECLINED,
+                        )
+                    }
+
+                    else -> {
+                        continue
+                    }
+                }
+            settleLater(row, change, toSettle)
+        }
+        val known = ours.map { it.reference.toString() }.toSet()
+        val strangers = status.cancelList.orEmpty().filter { it.extRef == null || it.extRef !in known }
+        if (strangers.isNotEmpty()) {
+            metrics.unexpectedReversal.incrementAndGet()
+            LOG.error(
+                "unexpected_reversal: invoice {} has {} cancel(s) the plugin did not start " +
+                    "(portal refund or chargeback)",
+                status.invoiceId,
+                strangers.size,
+            )
+        }
+    }
+
+    private fun settleLater(
+        row: TxRow,
+        change: TxChange,
+        toSettle: MutableList<TxRow>,
+    ) {
+        val before = row.state
+        val after = transactions.transition(row.recordId, TxState.OPEN, change)
+        if (after.state.isFinal && before != TxState.SENDING && after.state != before) toSettle += after
+    }
+
+    private fun applyCard(
+        status: InvoiceStatusResponse,
+        tenantId: UUID,
+    ) {
+        val wallet = status.walletData ?: return
+        for (pm in paymentMethods.findBySourceInvoice(status.invoiceId).filter { it.tenantId == tenantId }) {
+            val token = wallet.cardToken
+            when {
+                wallet.isCardSaved && token != null -> {
+                    val sealed = cipher.seal(token, pm.tenantId, pm.paymentMethodId)
+                    if (paymentMethods.activate(
+                            pm.paymentMethodId,
+                            sealed.ciphertext,
+                            sealed.keyId,
+                            cipher.hmac(token),
+                            wallet.maskedPan ?: status.paymentInfo?.maskedPan,
+                            status.paymentInfo?.paymentSystemRaw,
+                            wallet.country ?: status.paymentInfo?.country,
+                        )
+                    ) {
+                        LOG.info("Card saved on payment method {}", pm.paymentMethodId)
+                    }
+                }
+
+                wallet.statusRaw == "failed" -> {
+                    paymentMethods.setStatus(
+                        pm.paymentMethodId,
+                        CardStatus.FAILED,
+                        setOf(CardStatus.PENDING, CardStatus.NONE),
+                    )
+                }
+            }
+        }
+    }
+
+    // ---- helpers --------------------------------------------------------------------------------------------
+
+    private fun walletId(row: TxRow): String = row.accountId.toString()
+
+    private fun sameMoney(
+        row: TxRow,
+        status: InvoiceStatusResponse,
+    ): Boolean = status.amount == row.amountMinor && Money.isSameCurrency(status.ccy, Money.currency(row.currency))
+
+    private fun review(
+        row: TxRow,
+        why: String,
+    ): TxChange {
+        metrics.amountMismatch.incrementAndGet()
+        LOG.error("amount_mismatch: transaction {} needs review: {}", row.transactionId, why)
+        return TxChange(TxState.REVIEW, errorCode = NEEDS_REVIEW, errorMessage = why)
+    }
+
+    private fun settings(op: Operation): TenantSettings? =
+        (tenants.get(op.tenantId) as? TenantSettings.ParseResult.Valid)?.settings
+
+    private fun money(
+        op: Operation,
+        settings: TenantSettings,
+    ): Money? {
+        val amount = op.amount ?: return null
+        val currency = op.currency ?: return null
+        return try {
+            val javaCurrency = Money.currency(currency.name)
+            if (javaCurrency !in settings.allowedCurrencies) return null
+            Money.ofMajor(amount, javaCurrency).takeIf { it.minor > 0 }
+        } catch (e: InvalidAmountException) {
+            LOG.info("Refused {} for transaction {}: {}", op.type, op.transactionId, e.message)
+            null
+        }
+    }
+
+    private fun refused(
+        op: Operation,
+        code: String,
+        message: String,
+        decline: Boolean = false,
+    ): Answer = Answer.Refused(op, code, message, decline)
+
+    companion object {
+        private val LOG = LoggerFactory.getLogger(PaymentService::class.java)
+
+        const val CONFIG_INVALID = "CONFIG_INVALID"
+        const val INVALID_AMOUNT = "INVALID_AMOUNT"
+        const val INVALID_OPERATION = "INVALID_OPERATION"
+        const val NO_ACTIVE_CARD = "NO_ACTIVE_CARD"
+        const val PREVIOUS_CHARGE_UNRESOLVED = "PREVIOUS_CHARGE_UNRESOLVED"
+        const val PREVIOUS_OPERATION_UNRESOLVED = "PREVIOUS_OPERATION_UNRESOLVED"
+        const val CARD_UNREADABLE = "CARD_UNREADABLE"
+        const val NOT_SENT = "NOT_SENT"
+        const val REJECTED = "REJECTED"
+        const val OUTCOME_UNKNOWN = "OUTCOME_UNKNOWN"
+        const val DECLINED = "DECLINED"
+        const val EXPIRED = "EXPIRED"
+        const val NEEDS_REVIEW = "NEEDS_REVIEW"
+        const val INVALID_BASKET = "INVALID_BASKET"
+
+        private const val UAH = "UAH"
+        private const val NO_HOLD = "there is no held authorization"
+        private const val DEFAULT_DESTINATION = "Payment"
+        private const val UNRESOLVED_MESSAGE = "an earlier operation on this payment is unresolved"
+        private val DECLINE_CODES = setOf(AcquiringErrorCodes.TOKEN_NOT_FOUND)
+        private val REFUND_COUNTS =
+            setOf(TxState.SUCCESS, TxState.PENDING, TxState.SENDING, TxState.UNKNOWN, TxState.REVIEW)
+        val FIRST_CHECK: Duration = Duration.ofMinutes(2)
+        val EXPIRY_MARGIN: Duration = Duration.ofMinutes(5)
+        val THREE_DS_VALIDITY: Duration = Duration.ofHours(1)
+        val HOLD_LIFETIME: Duration = Duration.ofDays(9)
+    }
+}

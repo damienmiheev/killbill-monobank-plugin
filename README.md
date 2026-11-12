@@ -6,9 +6,8 @@
 
 A [Kill Bill](https://killbill.io) payment plugin for [monobank](https://monobank.ua) internet acquiring (Ukraine).
 
-> **Status: under construction (0.1.0-SNAPSHOT).** The bundle loads, checks its schema and settings and reports
-> health. Payment operations are being implemented one by one and are refused (`PLUGIN_FAILURE`,
-> `NOT_IMPLEMENTED`) until then. Do not use it for real money before 0.1.0 is released.
+> **Status: 0.1.0-SNAPSHOT, not released yet.** Every operation below is built and tested against a real Kill Bill and
+> the SDK's fake monobank. The release follows the live tests against monobank's test merchant (see CONTRIBUTING).
 
 It maps Kill Bill's payment API onto monobank with **one Kill Bill transaction per real monobank operation**:
 
@@ -23,7 +22,7 @@ It maps Kill Bill's payment API onto monobank with **one Kill Bill transaction p
 | Saved cards | Kill Bill payment methods backed by monobank wallet tokens |
 | `getPaymentInfo` | refreshed from `GET /api/merchant/invoice/status`, so Kill Bill's Janitor can settle anything |
 
-What it is designed around (being built; see the status above):
+What it is built around:
 
 - **No double charges.** monobank has no idempotency key, so the plugin keys every call by the Kill Bill
   transaction, never retries a call whose outcome is unknown (it becomes `UNKNOWN` and is resolved from monobank),
@@ -100,8 +99,35 @@ org.killbill.billing.plugin.monobank.allowedCurrencies=UAH
 | `language` | no | `uk` (default) or `en`. |
 | `allowedCurrencies` | no | Comma-separated ISO 4217 codes the merchant's contract allows. Default `UAH`. |
 | `checkoutValiditySeconds` | no | Lifetime of a hosted page. Default 3600. |
+| `basketItemCode` | no | When set, every payment carries a one-item basket (`merchantPaymInfo.basketOrder`) with this product code, unless the caller passes its own. Merchants with fiscal receipts or split payments need a basket. |
+| `splitReceiverId` | no | The split receiver every basket item goes to (merchants with split payments). Implies a basket. |
 
 There is no global fallback: a tenant without valid settings cannot make payments and reports unhealthy.
+
+## Using it
+
+Plugin properties (`pluginProperty=key=value` on Kill Bill's payment calls):
+
+| Property | Meaning |
+|---|---|
+| `hosted=true` | Pay on monobank's page. The transaction is PENDING; read `formUrl` from the transaction's plugin properties (`GET /1.0/kb/payments/{id}?withPluginInfo=true`) and send the customer there. Without it, the payment method's saved card is charged; with no saved card the charge is declined (`NO_ACTIVE_CARD`), never turned into a page nobody sees. |
+| `saveCard=true` | With `hosted=true`: save the card on the payment method (the customer must agree). |
+| `redirectUrl`, `destination`, `validitySeconds` | Overrides for one hosted payment. |
+| `callerRef` | Your own id for the payment (e.g. a checkout id); stored and returned as a property. |
+| `basketOrder` | A JSON array of `{name, qty, sum, code}` (plus `splitReceiverId`, `unit`, `tax`, `uktzed`) adding up to the amount. |
+| `initiationKind=client` | A saved-card charge made with the customer present (default `merchant`). |
+
+Transactions return `formUrl`, `tdsUrl` (3-D Secure), `invoiceId`, `expiresAt`, `callerRef` and `reference` as plugin
+properties. Holds (AUTHORIZE) are UAH only, as monobank allows.
+
+Routes under `/plugins/killbill-monobank/`:
+
+| Route | Auth | What |
+|---|---|---|
+| `POST /notification` | monobank's signature (and `X-Notification-Secret` if configured) | monobank's webhook. |
+| `POST /payments/{paymentId}/cancel` | Kill Bill credentials with `payment:transition` | Gives up an unpaid hosted page: 200 when cancelled, 409 when the customer paid at the same moment. |
+| `GET /pubkey` | Kill Bill credentials | monobank's current webhook public key, for a forwarder that verifies before forwarding. |
+| `GET /healthcheck` | none | Database, schema, counters; with tenant headers also the tenant's settings. |
 
 ## Health
 

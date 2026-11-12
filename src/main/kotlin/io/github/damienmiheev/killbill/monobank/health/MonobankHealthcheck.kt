@@ -6,6 +6,7 @@ package io.github.damienmiheev.killbill.monobank.health
 
 import io.github.damienmiheev.killbill.monobank.config.TenantSettings
 import io.github.damienmiheev.killbill.monobank.config.TenantSettingsProvider
+import io.github.damienmiheev.killbill.monobank.core.PluginMetrics
 import io.github.damienmiheev.killbill.monobank.db.SchemaCheck
 import org.killbill.billing.osgi.api.Healthcheck
 import org.killbill.billing.tenant.api.Tenant
@@ -20,6 +21,7 @@ import javax.sql.DataSource
 class MonobankHealthcheck(
     private val dataSource: DataSource,
     private val tenants: TenantSettingsProvider,
+    private val metrics: PluginMetrics? = null,
 ) : Healthcheck {
     override fun getHealthStatus(
         tenant: Tenant?,
@@ -45,6 +47,7 @@ class MonobankHealthcheck(
         details["database"] = "reachable"
         details["schema"] = if (schemaMissing.isEmpty()) "complete" else "incomplete"
         var healthy = schemaMissing.isEmpty()
+        metrics?.let { details["counters"] = it.snapshot() }
 
         if (tenant != null) {
             when (val settings = tenants.get(tenant.id)) {

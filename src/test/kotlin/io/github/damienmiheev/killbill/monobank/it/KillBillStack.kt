@@ -6,7 +6,9 @@ package io.github.damienmiheev.killbill.monobank.it
 
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
+import io.github.damienmiheev.monobank.testkit.FakeMonobankAcquiring
 import org.slf4j.LoggerFactory
+import org.testcontainers.Testcontainers
 import org.testcontainers.containers.GenericContainer
 import org.testcontainers.containers.Network
 import org.testcontainers.containers.output.Slf4jLogConsumer
@@ -33,6 +35,10 @@ class KillBillStack(
     private val applyPluginSchema: Boolean = true,
     /** Extra `KB_…` environment for the Kill Bill container. */
     private val extraEnv: Map<String, String> = emptyMap(),
+    /** The fake monobank the plugin talks to (merchant token alias `it`), if the test moves money. */
+    val fake: FakeMonobankAcquiring? = null,
+    /** Fail [start] unless the plugin runs (tests of refusals set it to false). */
+    private val expectRunning: Boolean = true,
 ) : AutoCloseable {
     private val network = Network.newNetwork()
     private val http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build()
@@ -78,9 +84,20 @@ class KillBillStack(
         try {
             db.start()
             if (applyPluginSchema) applyPluginDdl()
+            fake?.let { Testcontainers.exposeHostPorts(it.port) }
             killbillCreated = true
             killbill.start()
             awaitPluginSettled()
+            check(pluginState == "RUNNING" || !expectRunning) {
+                "the plugin did not start:\n" +
+                    killbillLogs()
+                        .lines()
+                        .filter {
+                            "monobank" in it || "Exception" in it || "Caused" in it
+                        }.takeLast(60)
+                        .joinToString("\n")
+            }
+            if (pluginState == "RUNNING") createPluginUser()
         } catch (e: Throwable) {
             close()
             throw e
@@ -135,7 +152,12 @@ class KillBillStack(
             "KB_org_killbill_billing_plugin_monobank_cardKeys" to "it1:$key",
             "KB_org_killbill_billing_plugin_monobank_tokenHmacKey" to key,
             "KB_org_killbill_billing_plugin_monobank_merchantTokenBindings" to "$BOUND_API_KEY:it",
-            "MONOBANK_MERCHANT_TOKEN_IT" to "test-merchant-token",
+            "MONOBANK_MERCHANT_TOKEN_IT" to (fake?.token ?: "test-merchant-token"),
+            "KB_org_killbill_billing_plugin_monobank_apiBaseUrl" to
+                (fake?.let { "http://host.testcontainers.internal:${it.port}" } ?: "https://api.monobank.ua"),
+            "KB_org_killbill_billing_plugin_monobank_readTimeoutSeconds" to "3",
+            "KB_org_killbill_billing_plugin_monobank_reconcileIntervalSeconds" to "30",
+            "KB_org_killbill_billing_plugin_monobank_statementMinIntervalSeconds" to "1",
             "MONOBANK_MERCHANT_TOKEN_OTHER" to "another-tenants-token",
         ) + extraEnv
     }
@@ -150,7 +172,7 @@ class KillBillStack(
 
     // ---- Kill Bill REST helpers ---------------------------------------------------------------------------------
 
-    private val baseUrl: String get() = "http://${killbill.host}:${killbill.getMappedPort(8080)}"
+    val baseUrl: String get() = "http://${killbill.host}:${killbill.getMappedPort(8080)}"
 
     fun get(
         path: String,
@@ -171,6 +193,184 @@ class KillBillStack(
                 auth = true,
             ).header("Content-Type", contentType).POST(HttpRequest.BodyPublishers.ofString(body)),
         )
+
+    /** The plugin's own Kill Bill user, with only `payment:transition` (design A7). */
+    private fun createPluginUser() {
+        val role =
+            JSON.writeValueAsString(
+                mapOf(
+                    "role" to "monobank-plugin",
+                    "permissions" to listOf("payment:transition"),
+                ),
+            )
+        check(
+            post("/1.0/kb/security/roles", role, "application/json").status in setOf(201, 409),
+        ) { "role creation failed" }
+        val user =
+            JSON.writeValueAsString(
+                mapOf(
+                    "username" to "monobank-plugin",
+                    "password" to "plugin-password",
+                    "roles" to listOf("monobank-plugin"),
+                ),
+            )
+        val response = post("/1.0/kb/security/users", user, "application/json")
+        check(response.status in setOf(201, 409)) { "plugin user creation failed: ${response.status} ${response.body}" }
+    }
+
+    /** The URL monobank (the fake, on this machine) posts webhooks to. */
+    val webhookUrl: String get() = "$baseUrl/plugins/killbill-monobank/notification"
+
+    private var boundTenant: TestTenant? = null
+
+    /**
+     * The tenant bound to the fake's merchant (API key [BOUND_API_KEY]), with valid plugin settings pointing webhooks
+     * at this Kill Bill. Created once per stack; tests isolate themselves by account.
+     */
+    @Synchronized
+    fun moneyTenant(extraConfig: String = ""): TestTenant {
+        boundTenant?.let { return it }
+        val tenant = createTenant(BOUND_API_KEY).also { boundTenant = it }
+        uploadPluginConfig(
+            tenant,
+            """
+            org.killbill.billing.plugin.monobank.merchantToken=env:it
+            org.killbill.billing.plugin.monobank.webhookUrl=$webhookUrl
+            org.killbill.billing.plugin.monobank.redirectUrl=https://shop.example/return
+            org.killbill.billing.plugin.monobank.allowedCurrencies=UAH,USD
+            """.trimIndent() + "\n" + extraConfig,
+        )
+        return tenant
+    }
+
+    fun createAccount(
+        tenant: TestTenant,
+        currency: String = "UAH",
+    ): String {
+        val body =
+            JSON.writeValueAsString(
+                mapOf(
+                    "name" to "Test customer",
+                    "currency" to currency,
+                    "externalKey" to UUID.randomUUID().toString(),
+                ),
+            )
+        val response = post("/1.0/kb/accounts", body, "application/json", tenant)
+        check(response.status == 201) { "account creation failed: ${response.status} ${response.body}" }
+        return UUID_PATTERN.findAll(response.location()!!).last().value
+    }
+
+    fun addPaymentMethod(
+        tenant: TestTenant,
+        accountId: String,
+        isDefault: Boolean = true,
+    ): String {
+        val body =
+            JSON.writeValueAsString(
+                mapOf(
+                    "pluginName" to "killbill-monobank",
+                    "pluginInfo" to mapOf<String, Any>(),
+                ),
+            )
+        val response =
+            post("/1.0/kb/accounts/$accountId/paymentMethods?isDefault=$isDefault", body, "application/json", tenant)
+        check(response.status == 201) { "payment method creation failed: ${response.status} ${response.body}" }
+        return UUID_PATTERN.findAll(response.location()!!).last().value
+    }
+
+    /** Creates a payment transaction and returns the payment as Kill Bill shows it (with plugin info). */
+    fun pay(
+        tenant: TestTenant,
+        accountId: String,
+        paymentMethodId: String,
+        type: String,
+        amount: String,
+        currency: String = "UAH",
+        properties: Map<String, String> = emptyMap(),
+    ): JsonNode {
+        val body =
+            JSON.writeValueAsString(
+                mapOf(
+                    "transactionType" to type,
+                    "amount" to amount,
+                    "currency" to currency,
+                    "paymentExternalKey" to UUID.randomUUID().toString(),
+                ),
+            )
+        val query =
+            "paymentMethodId=$paymentMethodId" +
+                properties.entries.joinToString("") { "&pluginProperty=${it.key}%3D${encode(it.value)}" }
+        val response = post("/1.0/kb/accounts/$accountId/payments?$query", body, "application/json", tenant)
+        check(
+            response.status in setOf(201, 402, 422, 502, 503),
+        ) { "payment failed: ${response.status} ${response.body}" }
+        val paymentId =
+            response.location()?.let { loc -> UUID_PATTERN.findAll(loc).lastOrNull()?.value }
+                ?: response
+                    .json()
+                    .path(
+                        "paymentId",
+                    ).asText()
+                    .ifEmpty { error("no payment in ${response.status} ${response.body}") }
+        return payment(tenant, paymentId)
+    }
+
+    /** A follow-up transaction (CAPTURE, REFUND, VOID) on an existing payment. */
+    fun followUp(
+        tenant: TestTenant,
+        paymentId: String,
+        type: String,
+        amount: String? = null,
+        currency: String = "UAH",
+    ): Response {
+        val path =
+            when (type) {
+                "CAPTURE" -> "/1.0/kb/payments/$paymentId"
+                "REFUND" -> "/1.0/kb/payments/$paymentId/refunds"
+                else -> "/1.0/kb/payments/$paymentId"
+            }
+        val body =
+            JSON.writeValueAsString(
+                mapOf("amount" to amount, "currency" to currency).filterValues { it != null },
+            )
+        return if (type == "VOID") {
+            send(
+                request(
+                    path,
+                    tenant,
+                    auth = true,
+                ).header(
+                    "Content-Type",
+                    "application/json",
+                ).method("DELETE", HttpRequest.BodyPublishers.ofString(body)),
+            )
+        } else {
+            post(path, body, "application/json", tenant)
+        }
+    }
+
+    fun payment(
+        tenant: TestTenant,
+        paymentId: String,
+        withPluginInfo: Boolean = false,
+    ): JsonNode = get("/1.0/kb/payments/$paymentId?withPluginInfo=$withPluginInfo", tenant).json()
+
+    /** Polls the payment until [done] holds, or fails after [timeout]. */
+    fun awaitPayment(
+        tenant: TestTenant,
+        paymentId: String,
+        timeout: Duration = Duration.ofSeconds(30),
+        done: (JsonNode) -> Boolean,
+    ): JsonNode {
+        val deadline = System.nanoTime() + timeout.toNanos()
+        var last = payment(tenant, paymentId)
+        while (!done(last)) {
+            check(System.nanoTime() < deadline) { "payment $paymentId never reached the expected state: $last" }
+            Thread.sleep(POLL_MS)
+            last = payment(tenant, paymentId)
+        }
+        return last
+    }
 
     /** Creates a tenant; by default with a fresh API key, which no merchant-token alias is bound to. */
     fun createTenant(apiKey: String = "it-${UUID.randomUUID()}"): TestTenant {
@@ -222,7 +422,7 @@ class KillBillStack(
 
     private fun send(builder: HttpRequest.Builder): Response {
         val response = http.send(builder.build(), HttpResponse.BodyHandlers.ofString())
-        return Response(response.statusCode(), response.body())
+        return Response(response.statusCode(), response.body(), response.headers().map())
     }
 
     /** Kill Bill's output plus its log files (Kill Bill writes most of its logs to files, not stdout). */
@@ -230,6 +430,19 @@ class KillBillStack(
         killbill.logs + killbill.execInContainer("sh", "-c", "cat /var/lib/tomcat/logs/* 2>/dev/null").stdout
 
     override fun close() {
+        if (killbillCreated) {
+            runCatching {
+                val dump = Path.of("target", "killbill-${System.currentTimeMillis()}.log")
+                Files.writeString(
+                    dump,
+                    killbillLogs()
+                        .lines()
+                        .filter {
+                            "monobank" in it || "\"level\":\"ERROR\"" in it
+                        }.joinToString("\n"),
+                )
+            }
+        }
         if (killbillCreated) runCatching { killbill.stop() }
         runCatching { db.stop() }
         runCatching { network.close() }
@@ -243,14 +456,27 @@ class KillBillStack(
     data class Response(
         val status: Int,
         val body: String,
+        val headers: Map<String, List<String>> = emptyMap(),
     ) {
         fun json(): JsonNode = JSON.readTree(body)
+
+        fun location(): String? =
+            headers.entries
+                .firstOrNull {
+                    it.key.equals("location", ignoreCase = true)
+                }?.value
+                ?.firstOrNull()
     }
 
     companion object {
         /** The API key the stack binds the merchant-token alias `it` to (MONOBANK_MERCHANT_TOKEN_IT). */
         const val BOUND_API_KEY = "it-bound-tenant"
         private const val DB_PASSWORD = "killbill"
+        private const val POLL_MS = 300L
+        private val UUID_PATTERN = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+        private fun encode(value: String): String = java.net.URLEncoder.encode(value, Charsets.UTF_8)
+
         private val JSON = ObjectMapper()
 
         private fun property(name: String): String =

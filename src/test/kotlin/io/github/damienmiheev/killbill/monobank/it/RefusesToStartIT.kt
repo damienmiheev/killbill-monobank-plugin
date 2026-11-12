@@ -11,7 +11,7 @@ import org.junit.jupiter.api.Test
 class RefusesToStartIT {
     @Test
     fun `without its schema the plugin does not run and serves nothing`() {
-        KillBillStack(applyPluginSchema = false).start().use { stack ->
+        KillBillStack(applyPluginSchema = false, expectRunning = false).start().use { stack ->
             assertThat(stack.pluginState).isEqualTo("STOPPED")
             assertThat(stack.get("/plugins/killbill-monobank/healthcheck", auth = false).status).isEqualTo(404)
             assertThat(stack.killbillLogs()).contains(
@@ -24,7 +24,7 @@ class RefusesToStartIT {
     @Test
     fun `with invalid system settings the plugin does not run`() {
         val badKeys = mapOf("KB_org_killbill_billing_plugin_monobank_cardKeys" to "bad")
-        KillBillStack(extraEnv = badKeys).start().use { stack ->
+        KillBillStack(extraEnv = badKeys, expectRunning = false).start().use { stack ->
             assertThat(stack.pluginState).isEqualTo("STOPPED")
             assertThat(stack.killbillLogs())
                 .contains("Invalid monobank plugin settings: cardKeys: each entry must be id:base64key")

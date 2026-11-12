@@ -114,6 +114,10 @@
         <maven-bundle-plugin.version>6.2.0</maven-bundle-plugin.version>
         <maven-dependency-plugin.version>3.11.0</maven-dependency-plugin.version>
         <maven.compiler.release>11</maven.compiler.release>
+        <monobank-sdk.version>
+            1.0.0-SNAPSHOT
+            <!-- pinned commit until 1.0.0 is on Maven Central: see CI -->
+        </monobank-sdk.version>
         <osgi.extra-import>org.osgi.framework;version="[1.8,2)",!kotlin.*,!com.fasterxml.*,!org.jetbrains.annotations.*,!org.intellij.lang.annotations.*</osgi.extra-import>
         <osgi.private>
             io.github.damienmiheev.killbill.monobank.*
@@ -144,6 +148,13 @@
                 <artifactId>jackson-databind</artifactId>
                 <version>${jackson-databind.version}</version>
             </dependency>
+            <dependency>
+                <groupId>io.github.damienmiheev</groupId>
+                <artifactId>monobank-bom</artifactId>
+                <version>${monobank-sdk.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
         </dependencies>
     </dependencyManagement>
 
@@ -152,6 +163,16 @@
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
             <!-- Embedded in the bundle, like kotlin-stdlib; everything provided comes from Kill Bill at runtime. -->
+        </dependency>
+        <dependency>
+            <groupId>io.github.damienmiheev</groupId>
+            <artifactId>monobank-acquiring</artifactId>
+            <!-- Embedded; its slf4j-api is Kill Bill's (declared provided below). -->
+        </dependency>
+        <dependency>
+            <groupId>io.github.damienmiheev</groupId>
+            <artifactId>monobank-testkit</artifactId>
+            <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>jakarta.servlet</groupId>

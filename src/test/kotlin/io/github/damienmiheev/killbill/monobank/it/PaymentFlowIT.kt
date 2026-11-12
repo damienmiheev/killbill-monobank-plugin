@@ -1,0 +1,455 @@
+/*
+ * Copyright 2026 Dmytro Mikhieiev
+ * SPDX-License-Identifier: Apache-2.0
+ */
+package io.github.damienmiheev.killbill.monobank.it
+
+import com.fasterxml.jackson.databind.JsonNode
+import com.fasterxml.jackson.databind.ObjectMapper
+import io.github.damienmiheev.monobank.testkit.FakeMonobankAcquiring
+import io.github.damienmiheev.monobank.testkit.Fault
+import io.github.damienmiheev.monobank.testkit.MonobankPaths
+import io.github.damienmiheev.monobank.testkit.WebhookDelivery
+import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.AfterAll
+import org.junit.jupiter.api.BeforeAll
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.TestInstance
+import java.time.Duration
+
+/**
+ * Money moving through a real Kill Bill 0.24.22 with the bundle installed, against the SDK's fake monobank, driven
+ * through Kill Bill's REST API exactly as a billing application would.
+ */
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+class PaymentFlowIT {
+    private lateinit var fake: FakeMonobankAcquiring
+    private lateinit var stack: KillBillStack
+    private val json = ObjectMapper()
+
+    @BeforeAll
+    fun start() {
+        fake = FakeMonobankAcquiring().start()
+        stack = KillBillStack(fake = fake)
+        stack.start()
+    }
+
+    @AfterAll
+    fun stop() {
+        if (::stack.isInitialized) stack.close()
+        if (::fake.isInitialized) fake.close()
+    }
+
+    private fun JsonNode.tx(index: Int = 0): JsonNode = path("transactions").path(index)
+
+    private fun JsonNode.lastTx(): JsonNode = path("transactions").last()
+
+    private fun JsonNode.status(index: Int = 0): String = tx(index).path("status").asText()
+
+    private fun JsonNode.prop(key: String): String? =
+        tx()
+            .path("properties")
+            .firstOrNull { it.path("key").asText() == key }
+            ?.path("value")
+            ?.asText()
+
+    /** A customer with a card saved by a first hosted payment. */
+    private fun customerWithCard(tenant: KillBillStack.TestTenant): Pair<String, String> {
+        val account = stack.createAccount(tenant)
+        val pm = stack.addPaymentMethod(tenant, account)
+        val first =
+            stack.pay(
+                tenant,
+                account,
+                pm,
+                "PURCHASE",
+                "100.00",
+                properties =
+                    mapOf(
+                        "hosted" to "true",
+                        "saveCard" to "true",
+                    ),
+            )
+        fake.payInvoice(
+            stack.payment(tenant, first.path("paymentId").asText(), withPluginInfo = true).prop("invoiceId")!!,
+        )
+        stack.awaitPayment(tenant, first.path("paymentId").asText()) { it.status() == "SUCCESS" }
+        awaitCardActive(tenant, pm)
+        return account to pm
+    }
+
+    private fun awaitCardActive(
+        tenant: KillBillStack.TestTenant,
+        pm: String,
+    ) {
+        val deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos()
+        while (true) {
+            val detail = stack.get("/1.0/kb/paymentMethods/$pm?withPluginInfo=true", tenant).json()
+            val status =
+                detail.path("pluginInfo").path("properties").firstOrNull {
+                    it.path("key").asText() ==
+                        "cardStatus"
+                }
+            if (status?.path("value")?.asText() == "ACTIVE") return
+            check(System.nanoTime() < deadline) { "card never became ACTIVE: $detail" }
+            Thread.sleep(300)
+        }
+    }
+
+    @Test
+    fun `hosted purchase saves the card, settles by webhook, and the card then pays a renewal`() {
+        val tenant = stack.moneyTenant()
+        val account = stack.createAccount(tenant)
+        val pm = stack.addPaymentMethod(tenant, account)
+
+        val pending =
+            stack.pay(
+                tenant,
+                account,
+                pm,
+                "PURCHASE",
+                "2290.00",
+                properties =
+                    mapOf(
+                        "hosted" to "true",
+                        "saveCard" to "true",
+                    ),
+            )
+        val paymentId = pending.path("paymentId").asText()
+        val withInfo = stack.payment(tenant, paymentId, withPluginInfo = true)
+        assertThat(withInfo.status()).isEqualTo("PENDING")
+        assertThat(withInfo.prop("formUrl")).startsWith("http")
+        val invoiceId = withInfo.prop("invoiceId")!!
+
+        fake.payInvoice(invoiceId)
+        val paid = stack.awaitPayment(tenant, paymentId) { it.status() == "SUCCESS" }
+        assertThat(paid.path("purchasedAmount").decimalValue()).isEqualByComparingTo("2290.00")
+        awaitCardActive(tenant, pm)
+
+        val renewal = stack.pay(tenant, account, pm, "PURCHASE", "2290.00")
+        assertThat(renewal.status()).isEqualTo("SUCCESS")
+        assertThat(fake.requestCount(MonobankPaths.WALLET_PAYMENT)).isGreaterThanOrEqualTo(1)
+
+        // The token never leaves the plugin.
+        val token = fake.invoice(invoiceId)!!.cardToken!!
+        assertThat(stack.get("/1.0/kb/paymentMethods/$pm?withPluginInfo=true", tenant).body).doesNotContain(token)
+        assertThat(
+            stack.get("/1.0/kb/accounts/$account/paymentMethods?withPluginInfo=true", tenant).body,
+        ).doesNotContain(token)
+        assertThat(stack.killbillLogs()).doesNotContain(token)
+    }
+
+    @Test
+    fun `a timeout after monobank charged is UNKNOWN, blocks a second charge, and resolves to one charge`() {
+        val tenant = stack.moneyTenant()
+        val (account, pm) = customerWithCard(tenant)
+        val before = fake.requestCount(MonobankPaths.WALLET_PAYMENT)
+
+        // monobank charges but the answer never comes; its webhook is held back until the test lets it go.
+        fake.setWebhookDelivery(WebhookDelivery.MANUAL)
+        fake.injectFault(MonobankPaths.WALLET_PAYMENT, Fault.timeout())
+        val unknown =
+            try {
+                stack.pay(tenant, account, pm, "PURCHASE", "50.00")
+            } finally {
+                fake.clearFaults()
+            }
+        assertThat(unknown.status()).isEqualTo("UNKNOWN")
+
+        val second = stack.pay(tenant, account, pm, "PURCHASE", "50.00")
+        assertThat(second.status()).isEqualTo("PLUGIN_FAILURE")
+        assertThat(second.tx().path("gatewayErrorCode").asText()).isEqualTo("PREVIOUS_CHARGE_UNRESOLVED")
+
+        // monobank's webhook for the charge that went through resolves it; Kill Bill's Janitor repairs the UNKNOWN.
+        fake.setWebhookDelivery(WebhookDelivery.AUTOMATIC)
+        fake.deliverWebhooksNow()
+        val resolved =
+            stack.awaitPayment(tenant, unknown.path("paymentId").asText(), Duration.ofSeconds(60)) {
+                stack.payment(tenant, it.path("paymentId").asText(), withPluginInfo = true).status() == "SUCCESS"
+            }
+        assertThat(resolved.path("paymentId").asText()).isNotEmpty
+        // Exactly one charge reached monobank: the refused second attempt never left the plugin.
+        assertThat(fake.requestCount(MonobankPaths.WALLET_PAYMENT) - before).isEqualTo(1)
+        assertThat(fake.invoices().count { it.viaWallet && it.amount == 5000L && it.status == "success" }).isEqualTo(1)
+    }
+
+    @Test
+    fun `without a saved card and without hosted, a charge is declined and no monobank call is made`() {
+        val tenant = stack.moneyTenant()
+        val account = stack.createAccount(tenant)
+        val pm = stack.addPaymentMethod(tenant, account)
+        val before = fake.requests().size
+
+        val declined = stack.pay(tenant, account, pm, "PURCHASE", "10.00")
+
+        assertThat(declined.status()).isEqualTo("PAYMENT_FAILURE")
+        assertThat(declined.tx().path("gatewayErrorCode").asText()).isEqualTo("NO_ACTIVE_CARD")
+        assertThat(fake.requests().size).isEqualTo(before)
+    }
+
+    @Test
+    fun `a declined hosted payment fails in Kill Bill`() {
+        val tenant = stack.moneyTenant()
+        val account = stack.createAccount(tenant)
+        val pm = stack.addPaymentMethod(tenant, account)
+        val pending = stack.pay(tenant, account, pm, "PURCHASE", "10.00", properties = mapOf("hosted" to "true"))
+        val paymentId = pending.path("paymentId").asText()
+
+        fake.failInvoice(stack.payment(tenant, paymentId, withPluginInfo = true).prop("invoiceId")!!)
+
+        assertThat(
+            stack
+                .awaitPayment(tenant, paymentId) {
+                    it.status() == "PAYMENT_FAILURE"
+                }.status(),
+        ).isEqualTo("PAYMENT_FAILURE")
+    }
+
+    @Test
+    fun `a lost webhook is recovered by reading the payment with plugin info`() {
+        val tenant = stack.moneyTenant()
+        val account = stack.createAccount(tenant)
+        val pm = stack.addPaymentMethod(tenant, account)
+        val pending = stack.pay(tenant, account, pm, "PURCHASE", "15.00", properties = mapOf("hosted" to "true"))
+        val paymentId = pending.path("paymentId").asText()
+        val invoiceId = stack.payment(tenant, paymentId, withPluginInfo = true).prop("invoiceId")!!
+
+        fake.dropNextWebhooks(10) { it.invoiceId == invoiceId }
+        fake.payInvoice(invoiceId)
+        assertThat(stack.payment(tenant, paymentId).status()).isEqualTo("PENDING")
+
+        val repaired = stack.payment(tenant, paymentId, withPluginInfo = true)
+        assertThat(repaired.status()).isEqualTo("SUCCESS")
+        fake.clearFaults()
+    }
+
+    @Test
+    fun `a hosted invoice payment marks the Kill Bill invoice paid`() {
+        val tenant = stack.moneyTenant()
+        val account = stack.createAccount(tenant)
+        val pm = stack.addPaymentMethod(tenant, account)
+        val charge =
+            json.writeValueAsString(
+                listOf(
+                    mapOf(
+                        "accountId" to account,
+                        "amount" to "12900.00",
+                        "currency" to "UAH",
+                        "description" to "Audit",
+                    ),
+                ),
+            )
+        val created =
+            stack.post(
+                "/1.0/kb/invoices/charges/$account?autoCommit=true",
+                charge,
+                "application/json",
+                tenant,
+            )
+        assertThat(created.status).describedAs(created.body).isIn(200, 201)
+        val invoiceId =
+            created
+                .json()
+                .path(0)
+                .path("invoiceId")
+                .asText()
+
+        val body =
+            json.writeValueAsString(
+                mapOf(
+                    "accountId" to account,
+                    "purchasedAmount" to "12900.00",
+                    "paymentMethodId" to pm,
+                ),
+            )
+        val response =
+            stack.post(
+                "/1.0/kb/invoices/$invoiceId/payments?externalPayment=false" +
+                    "&pluginProperty=hosted%3Dtrue&pluginProperty=callerRef%3Dcheckout-1",
+                body,
+                "application/json",
+                tenant,
+            )
+        assertThat(response.status).describedAs(response.body).isIn(201, 402)
+        val payments = stack.get("/1.0/kb/invoices/$invoiceId/payments?withPluginInfo=true", tenant).json()
+        val paymentId = payments.path(0).path("paymentId").asText()
+        val withInfo = stack.payment(tenant, paymentId, withPluginInfo = true)
+        assertThat(withInfo.status()).isEqualTo("PENDING")
+        assertThat(withInfo.prop("callerRef")).isEqualTo("checkout-1")
+
+        fake.payInvoice(withInfo.prop("invoiceId")!!)
+        stack.awaitPayment(tenant, paymentId) { it.status() == "SUCCESS" }
+
+        val deadline = System.nanoTime() + Duration.ofSeconds(30).toNanos()
+        var invoice = stack.get("/1.0/kb/invoices/$invoiceId", tenant).json()
+        while (invoice.path("balance").decimalValue().signum() != 0 && System.nanoTime() < deadline) {
+            Thread.sleep(300)
+            invoice = stack.get("/1.0/kb/invoices/$invoiceId", tenant).json()
+        }
+        assertThat(invoice.path("balance").decimalValue()).isEqualByComparingTo("0")
+    }
+
+    @Test
+    fun `an unpaid hosted page can be cancelled, one paid at the same moment answers 409 and stays paid`() {
+        val tenant = stack.moneyTenant()
+        val account = stack.createAccount(tenant)
+        val pm = stack.addPaymentMethod(tenant, account)
+
+        val unpaid =
+            stack
+                .pay(
+                    tenant,
+                    account,
+                    pm,
+                    "PURCHASE",
+                    "20.00",
+                    properties = mapOf("hosted" to "true"),
+                ).path("paymentId")
+                .asText()
+        val cancelled = stack.post("/plugins/killbill-monobank/payments/$unpaid/cancel", "", "application/json", tenant)
+        assertThat(cancelled.status).describedAs(cancelled.body).isEqualTo(200)
+        assertThat(
+            stack
+                .awaitPayment(tenant, unpaid) {
+                    it.status() == "PAYMENT_FAILURE"
+                }.status(),
+        ).isEqualTo("PAYMENT_FAILURE")
+
+        val paid =
+            stack
+                .pay(
+                    tenant,
+                    account,
+                    pm,
+                    "PURCHASE",
+                    "20.00",
+                    properties = mapOf("hosted" to "true"),
+                ).path("paymentId")
+                .asText()
+        fake.payInvoice(stack.payment(tenant, paid, withPluginInfo = true).prop("invoiceId")!!)
+        val conflict = stack.post("/plugins/killbill-monobank/payments/$paid/cancel", "", "application/json", tenant)
+        assertThat(conflict.status).describedAs(conflict.body).isEqualTo(409)
+        assertThat(stack.awaitPayment(tenant, paid) { it.status() == "SUCCESS" }.status()).isEqualTo("SUCCESS")
+
+        val anonymous = stack.get("/plugins/killbill-monobank/pubkey", tenant = null, auth = false)
+        assertThat(anonymous.status).isEqualTo(401)
+        val key = stack.get("/plugins/killbill-monobank/pubkey", tenant)
+        assertThat(key.status).isEqualTo(200)
+        assertThat(key.json().path("key").asText()).isEqualTo(fake.signer.publicKey)
+    }
+
+    @Test
+    fun `partial then full refund of a saved-card charge, and a refund above what is left is refused`() {
+        val tenant = stack.moneyTenant()
+        val (account, pm) = customerWithCard(tenant)
+        val payment = stack.pay(tenant, account, pm, "PURCHASE", "100.00")
+        val paymentId = payment.path("paymentId").asText()
+        assertThat(payment.status()).isEqualTo("SUCCESS")
+
+        stack.followUp(tenant, paymentId, "REFUND", "30.00")
+        stack.awaitPayment(tenant, paymentId) {
+            it.lastTx().path("status").asText() == "SUCCESS" &&
+                it.path("refundedAmount").decimalValue().signum() > 0
+        }
+        val tooMuch = stack.followUp(tenant, paymentId, "REFUND", "80.00")
+        assertThat(tooMuch.status).isNotEqualTo(201)
+        stack.followUp(tenant, paymentId, "REFUND", "70.00")
+        val refunded =
+            stack.awaitPayment(tenant, paymentId) {
+                it.path("refundedAmount").decimalValue().compareTo(java.math.BigDecimal("100")) ==
+                    0
+            }
+        assertThat(refunded.path("refundedAmount").decimalValue()).isEqualByComparingTo("100")
+    }
+
+    @Test
+    fun `authorize with a hosted hold, capture part of it, and void another hold`() {
+        val tenant = stack.moneyTenant()
+        val account = stack.createAccount(tenant)
+        val pm = stack.addPaymentMethod(tenant, account)
+
+        val auth = stack.pay(tenant, account, pm, "AUTHORIZE", "300.00", properties = mapOf("hosted" to "true"))
+        val authId = auth.path("paymentId").asText()
+        fake.payInvoice(stack.payment(tenant, authId, withPluginInfo = true).prop("invoiceId")!!)
+        stack.awaitPayment(tenant, authId) { it.status() == "SUCCESS" }
+        stack.followUp(tenant, authId, "CAPTURE", "250.00")
+        val captured = stack.awaitPayment(tenant, authId) { it.path("capturedAmount").decimalValue().signum() > 0 }
+        assertThat(captured.path("capturedAmount").decimalValue()).isEqualByComparingTo("250")
+
+        val second = stack.pay(tenant, account, pm, "AUTHORIZE", "100.00", properties = mapOf("hosted" to "true"))
+        val secondId = second.path("paymentId").asText()
+        fake.payInvoice(stack.payment(tenant, secondId, withPluginInfo = true).prop("invoiceId")!!)
+        stack.awaitPayment(tenant, secondId) { it.status() == "SUCCESS" }
+        stack.followUp(tenant, secondId, "VOID")
+        val voided =
+            stack.awaitPayment(tenant, secondId) {
+                it.lastTx().path("transactionType").asText() == "VOID" &&
+                    it.lastTx().path("status").asText() == "SUCCESS"
+            }
+        assertThat(voided.path("authAmount").decimalValue()).isEqualByComparingTo("0")
+        assertThat(
+            fake.invoice(stack.payment(tenant, secondId, withPluginInfo = true).prop("invoiceId")!!)!!.status,
+        ).isEqualTo("reversed")
+    }
+
+    @Test
+    fun `a forged webhook is ignored and changes nothing`() {
+        val tenant = stack.moneyTenant()
+        val account = stack.createAccount(tenant)
+        val pm = stack.addPaymentMethod(tenant, account)
+        val pending = stack.pay(tenant, account, pm, "PURCHASE", "33.00", properties = mapOf("hosted" to "true"))
+        val paymentId = pending.path("paymentId").asText()
+
+        val invoiceId = stack.payment(tenant, paymentId, withPluginInfo = true).prop("invoiceId")!!
+        fake.corruptNextWebhookSignatures(10) { it.invoiceId == invoiceId }
+        fake.payInvoice(invoiceId)
+        fake.deliverWebhooksNow()
+        Thread.sleep(1000)
+        assertThat(stack.payment(tenant, paymentId).status()).isEqualTo("PENDING")
+        fake.clearFaults()
+    }
+
+    @Test
+    fun `payments in another allowed currency use its own minor unit`() {
+        val tenant = stack.moneyTenant()
+        val account = stack.createAccount(tenant, currency = "USD")
+        val pm = stack.addPaymentMethod(tenant, account)
+        val pending =
+            stack.pay(
+                tenant,
+                account,
+                pm,
+                "PURCHASE",
+                "19.99",
+                currency = "USD",
+                properties =
+                    mapOf("hosted" to "true"),
+            )
+        val invoiceId =
+            stack
+                .payment(
+                    tenant,
+                    pending.path("paymentId").asText(),
+                    withPluginInfo = true,
+                ).prop("invoiceId")!!
+        val invoice = fake.invoice(invoiceId)!!
+        assertThat(invoice.amount).isEqualTo(1999L)
+        assertThat(invoice.ccy).isEqualTo(840)
+
+        val notAllowed = stack.createAccount(tenant, currency = "EUR")
+        val eurPm = stack.addPaymentMethod(tenant, notAllowed)
+        val refused =
+            stack.pay(
+                tenant,
+                notAllowed,
+                eurPm,
+                "PURCHASE",
+                "5.00",
+                currency = "EUR",
+                properties =
+                    mapOf("hosted" to "true"),
+            )
+        assertThat(refused.status()).isEqualTo("PLUGIN_FAILURE")
+        assertThat(refused.tx().path("gatewayErrorCode").asText()).isEqualTo("INVALID_AMOUNT")
+    }
+}

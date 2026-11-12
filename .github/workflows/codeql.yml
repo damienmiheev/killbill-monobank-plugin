@@ -33,6 +33,9 @@ jobs:
           java-version: "21"
           # No cache here: warm-cache.yml is the only writer of the Maven cache on main.
 
+
+      - name: Install the monobank SDK (pinned commit, until it is on Maven Central)
+        run: scripts/install-monobank-sdk.sh
       - uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           languages: java-kotlin

@@ -4,7 +4,11 @@ config:
 
 complexity:
   LongMethod:
-    allowedLines: 60
+    # ktlint puts every argument on its own line, which makes wiring code long.
+    allowedLines: 80
+  CyclomaticComplexMethod:
+    # The validation of a payment operation lists every refusal in one place on purpose.
+    allowedComplexity: 20
   LongParameterList:
     # Kill Bill's PaymentPluginApi fixes the parameter lists of its operations.
     active: false
@@ -21,7 +25,13 @@ style:
   MagicNumber:
     active: false
   ReturnCount:
-    max: 4
+    max: 5
+    # Early returns for refusals and guards read better than nested conditions in payment code.
+    excludeGuardClauses: true
+  LoopWithTooManyJumpStatements:
+    maxJumpCount: 2
+  ThrowsCount:
+    max: 3
 
 exceptions:
   TooGenericExceptionCaught:
