@@ -6,7 +6,7 @@
 
 A [Kill Bill](https://killbill.io) payment plugin for [monobank](https://monobank.ua) internet acquiring (Ukraine).
 
-> **Status: 0.1.1, the first release.** Every operation below is tested against a real Kill Bill with the SDK's fake
+> **Status: 0.1.2, the first release.** Every operation below is tested against a real Kill Bill with the SDK's fake
 > monobank, and live against monobank's test merchant.
 
 It maps Kill Bill's payment API onto monobank with **one Kill Bill transaction per real monobank operation**:
@@ -50,8 +50,8 @@ A monobank acquiring merchant token. Card saving (tokenisation) must be switched
 1. Apply the schema to Kill Bill's database: [`src/main/resources/ddl-postgresql.sql`](src/main/resources/ddl-postgresql.sql)
    (later versions add `migration/V…sql` files). The plugin never creates tables and refuses to start without them.
 2. Install the bundle from Maven Central
-   (`io.github.damienmiheev:killbill-monobank-plugin:0.1.1`):
-   `kpm install_java_plugin killbill-monobank --group-id=io.github.damienmiheev --artifact-id=killbill-monobank-plugin --version=0.1.1`,
+   (`io.github.damienmiheev:killbill-monobank-plugin:0.1.2`):
+   `kpm install_java_plugin killbill-monobank --group-id=io.github.damienmiheev --artifact-id=killbill-monobank-plugin --version=0.1.2`,
    or put the jar at `/var/lib/killbill/bundles/plugins/java/killbill-monobank/<version>/killbill-monobank-<version>.jar`.
    Bake it into your Kill Bill image (owned by Kill Bill's user): Kill Bill recreates its plugins directory on
    first boot, so a file copied into a container before its first start is lost.
