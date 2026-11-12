@@ -9,6 +9,7 @@ import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.github.damienmiheev.killbill.monobank.config.TenantSettings
 import io.github.damienmiheev.monobank.acquiring.common.BasketItem
+import io.github.damienmiheev.monobank.acquiring.common.FiscalizationItem
 import java.math.BigDecimal
 
 /**
@@ -54,6 +55,26 @@ object Baskets {
         }
         return items
     }
+
+    /**
+     * The receipt items of a capture or a partial refund (`invoice/finalize`, `invoice/cancel`): monobank refuses an
+     * amount without them on a merchant with receipts or split payments. The caller's `basketOrder` if given (it
+     * must add up to the amount), else the tenant's one item, else none.
+     */
+    fun forOperation(
+        settings: TenantSettings,
+        name: String,
+        json: String?,
+        amountMinor: Long,
+    ): List<FiscalizationItem>? =
+        (fromProperty(json, amountMinor) ?: single(settings, name, amountMinor))?.map { item ->
+            FiscalizationItem
+                .builder(item.name, item.qty, item.sum, item.code)
+                .splitReceiverId(item.splitReceiverId)
+                .tax(item.tax)
+                .uktzed(item.uktzed)
+                .build()
+        }
 
     private fun item(node: JsonNode): BasketItem {
         val name = node.path("name").asText("")

@@ -180,6 +180,7 @@ abstract class ServiceHarness {
             org.killbill.billing.plugin.monobank.merchantToken=env:it
             org.killbill.billing.plugin.monobank.webhookUrl=http://127.0.0.1:${receiver.address.port}/hook
             org.killbill.billing.plugin.monobank.allowedCurrencies=UAH,USD
+            org.killbill.billing.plugin.monobank.splitReceiverId=rcv-it
             """.trimIndent()
         return TenantSettingsProvider(
             readRaw = { config },

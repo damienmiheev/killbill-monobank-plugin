@@ -39,6 +39,8 @@ class KillBillStack(
     val fake: FakeMonobankAcquiring? = null,
     /** Fail [start] unless the plugin runs (tests of refusals set it to false). */
     private val expectRunning: Boolean = true,
+    /** A monobank **test** merchant token: the plugin then talks to the real API (live tests only). */
+    private val liveToken: String? = null,
 ) : AutoCloseable {
     private val network = Network.newNetwork()
     private val http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build()
@@ -152,10 +154,10 @@ class KillBillStack(
             "KB_org_killbill_billing_plugin_monobank_cardKeys" to "it1:$key",
             "KB_org_killbill_billing_plugin_monobank_tokenHmacKey" to key,
             "KB_org_killbill_billing_plugin_monobank_merchantTokenBindings" to "$BOUND_API_KEY:it",
-            "MONOBANK_MERCHANT_TOKEN_IT" to (fake?.token ?: "test-merchant-token"),
+            "MONOBANK_MERCHANT_TOKEN_IT" to (fake?.token ?: liveToken ?: "test-merchant-token"),
             "KB_org_killbill_billing_plugin_monobank_apiBaseUrl" to
                 (fake?.let { "http://host.testcontainers.internal:${it.port}" } ?: "https://api.monobank.ua"),
-            "KB_org_killbill_billing_plugin_monobank_readTimeoutSeconds" to "3",
+            "KB_org_killbill_billing_plugin_monobank_readTimeoutSeconds" to (if (liveToken != null) "15" else "3"),
             "KB_org_killbill_billing_plugin_monobank_reconcileIntervalSeconds" to "30",
             "KB_org_killbill_billing_plugin_monobank_statementMinIntervalSeconds" to "1",
             "MONOBANK_MERCHANT_TOKEN_OTHER" to "another-tenants-token",

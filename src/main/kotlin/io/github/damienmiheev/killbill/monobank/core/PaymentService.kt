@@ -23,6 +23,7 @@ import io.github.damienmiheev.killbill.monobank.mono.MonobankClients
 import io.github.damienmiheev.monobank.acquiring.MonobankAcquiring
 import io.github.damienmiheev.monobank.acquiring.common.AcquiringErrorCodes
 import io.github.damienmiheev.monobank.acquiring.common.BasketItem
+import io.github.damienmiheev.monobank.acquiring.common.FiscalizationItem
 import io.github.damienmiheev.monobank.acquiring.common.InitiationKind
 import io.github.damienmiheev.monobank.acquiring.common.InvoiceStatus
 import io.github.damienmiheev.monobank.acquiring.common.MerchantPaymInfo
@@ -408,10 +409,16 @@ class PaymentService(
                     else -> null
                 }
             if (refusal != null) return@followUp FollowUp.Refuse(INVALID_OPERATION, refusal)
+            val items = operationItems(op, settings, money) ?: return@followUp INVALID_ITEMS
             FollowUp.Send(money, auth!!.invoiceId!!) { _, client ->
                 val response =
                     client.invoices.finalize(
-                        FinalizeInvoiceRequest.builder(auth.invoiceId, money.minor).build(),
+                        FinalizeInvoiceRequest
+                            .builder(
+                                auth.invoiceId,
+                                money.minor,
+                            ).items(items.ifEmpty { null })
+                            .build(),
                     )
                 operationChange(response.status, response.statusRaw, money.minor)
             }
@@ -464,6 +471,7 @@ class PaymentService(
                     else -> null
                 }
             if (refusal != null) return@followUp FollowUp.Refuse(INVALID_OPERATION, refusal)
+            val items = operationItems(op, settings, money) ?: return@followUp INVALID_ITEMS
             FollowUp.Send(money, charge!!.invoiceId!!) { row, client ->
                 // The amount is always sent, so a partly captured hold is never refunded by monobank's own guess.
                 val request =
@@ -472,10 +480,29 @@ class PaymentService(
                             charge.invoiceId,
                         ).extRef(row.reference.toString())
                         .amount(money.minor)
+                        .items(items.ifEmpty { null })
                 val response = client.invoices.cancel(request.build())
                 operationChange(response.status, response.statusRaw, money.minor)
             }
         }
+
+    /**
+     * Receipt items for a capture or refund (empty when the tenant uses none), or null when the caller's basket is
+     * invalid. monobank refuses a partial amount without them on a merchant with receipts or split payments.
+     */
+    private fun operationItems(
+        op: Operation,
+        settings: TenantSettings,
+        money: Money,
+    ): List<FiscalizationItem>? {
+        val name = op.properties.string(Properties.DESTINATION) ?: settings.destination ?: DEFAULT_DESTINATION
+        return try {
+            Baskets.forOperation(settings, name, op.properties.string(Properties.BASKET_ORDER), money.minor).orEmpty()
+        } catch (e: IllegalArgumentException) {
+            LOG.info("Refused {} for transaction {}: {}", op.type, op.transactionId, e.message)
+            null
+        }
+    }
 
     /** Idempotency, settings, the plan, the claim and the single call, shared by capture, void and refund. */
     private fun followUp(
@@ -1044,6 +1071,7 @@ class PaymentService(
         private val PAID_OR_PAYING = setOf("processing", "success", "hold")
 
         private const val UAH = "UAH"
+        private val INVALID_ITEMS = FollowUp.Refuse(INVALID_BASKET, "basketOrder must add up to the amount")
         private val CAPTURE_OR_VOID = setOf(TransactionType.CAPTURE, TransactionType.VOID)
         private val VALIDITY_RANGE = 60L..2_592_000L
         const val INVALID_REQUEST = "INVALID_REQUEST"

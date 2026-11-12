@@ -84,6 +84,9 @@ class OperationsIT : ServiceHarness() {
         val captured = stored(payments.capture(op(TransactionType.CAPTURE, account, payment, pm, "6.00")))
         assertThat(captured.state).isEqualTo(TxState.SUCCESS)
         assertThat(captured.processedAmountMinor).isEqualTo(600)
+        // A merchant with receipts or split payments refuses a partial finalize without items (seen live: 1001).
+        val finalize = fake.requests().last { it.path == MonobankPaths.INVOICE_FINALIZE }.body
+        assertThat(finalize).contains("\"items\"", "\"sum\":600", "\"splitReceiverId\":\"rcv-it\"")
 
         val cancelCalls = fake.requestCount(MonobankPaths.INVOICE_CANCEL)
         assertThat(refusalCode(payments.capture(op(TransactionType.CAPTURE, account, payment, pm, "1.00"))))
@@ -100,6 +103,8 @@ class OperationsIT : ServiceHarness() {
             .isEqualTo(PaymentService.INVALID_OPERATION)
         val refund = stored(payments.refund(op(TransactionType.REFUND, account, payment, pm, "6.00")))
         assertThat(awaitRow(refund) { it.state.isFinal }.state).isEqualTo(TxState.SUCCESS)
+        val cancel = fake.requests().last { it.path == MonobankPaths.INVOICE_CANCEL }.body
+        assertThat(cancel).contains("\"items\"", "\"sum\":600", "\"splitReceiverId\":\"rcv-it\"")
     }
 
     @Test
