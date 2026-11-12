@@ -4,11 +4,8 @@
  */
 package io.github.damienmiheev.killbill.monobank.config
 
-import io.github.damienmiheev.killbill.monobank.money.InvalidAmountException
-import io.github.damienmiheev.killbill.monobank.money.Money
 import java.io.StringReader
 import java.net.URI
-import java.util.Currency
 import java.util.Properties
 
 /**
@@ -22,7 +19,6 @@ class TenantSettings private constructor(
     val redirectUrl: URI?,
     val destination: String?,
     val language: String,
-    val allowedCurrencies: Set<Currency>,
     val checkoutValiditySeconds: Long,
     /**
      * When set, every monobank payment carries a one-item basket (`merchantPaymInfo.basketOrder`) with this product
@@ -34,7 +30,6 @@ class TenantSettings private constructor(
 ) {
     override fun toString(): String =
         "TenantSettings(webhookUrl=$webhookUrl, redirectUrl=$redirectUrl, language=$language, " +
-            "allowedCurrencies=${allowedCurrencies.map { it.currencyCode }}, " +
             "checkoutValiditySeconds=$checkoutValiditySeconds, merchantToken=$merchantToken)"
 
     companion object {
@@ -46,9 +41,6 @@ class TenantSettings private constructor(
          * (system setting `merchantTokenBindings`), so one tenant can never use another's merchant token.
          */
         const val MERCHANT_TOKEN_ENV_PREFIX = "MONOBANK_MERCHANT_TOKEN_"
-
-        /** The only currencies monobank acquiring accepts (checked live: any other ccy gets 1001 "invalid 'ccy'"). */
-        val MONOBANK_CURRENCIES: List<String> = listOf("UAH", "USD", "EUR")
 
         private val LOG = org.slf4j.LoggerFactory.getLogger(TenantSettings::class.java)
         val ALIAS = Regex("[A-Za-z0-9_]{1,64}")
@@ -83,7 +75,6 @@ class TenantSettings private constructor(
             val redirectUrl = url("redirectUrl", get("redirectUrl"), required = false, errors)
             val language = get("language")?.lowercase() ?: "uk"
             if (language !in LANGUAGES) errors += "language must be one of $LANGUAGES"
-            val currencies = currencies(get("allowedCurrencies"), errors)
             val validity = validity(get("checkoutValiditySeconds"), errors)
 
             if (errors.isNotEmpty() || token == null || webhookUrl == null) return ParseResult.Invalid(errors)
@@ -94,7 +85,6 @@ class TenantSettings private constructor(
                     redirectUrl = redirectUrl,
                     destination = get("destination"),
                     language = language,
-                    allowedCurrencies = currencies,
                     checkoutValiditySeconds = validity,
                     basketItemCode = get("basketItemCode") ?: get("splitReceiverId")?.let { DEFAULT_ITEM_CODE },
                     splitReceiverId = get("splitReceiverId"),
@@ -152,33 +142,6 @@ class TenantSettings private constructor(
                 return null
             }
             return uri
-        }
-
-        private fun currencies(
-            value: String?,
-            errors: MutableList<String>,
-        ): Set<Currency> {
-            val codes = value?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() } ?: listOf("UAH")
-            if (codes.isEmpty()) {
-                errors += "allowedCurrencies must list at least one currency"
-                return emptySet()
-            }
-            return codes
-                .mapNotNull { code ->
-                    try {
-                        Money.currency(code).also { Money.ofMajor(java.math.BigDecimal.ZERO, it) }
-                    } catch (e: InvalidAmountException) {
-                        errors += "allowedCurrencies: ${e.message}"
-                        null
-                    }
-                }.filter { currency ->
-                    (currency.currencyCode in MONOBANK_CURRENCIES).also { accepted ->
-                        if (!accepted) {
-                            errors += "allowedCurrencies: monobank accepts only " +
-                                "${MONOBANK_CURRENCIES.joinToString()}, not ${currency.currencyCode}"
-                        }
-                    }
-                }.toSet()
         }
 
         private fun validity(

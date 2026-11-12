@@ -105,6 +105,35 @@ class LivePayer(
         }
     }
 
+    /**
+     * Confirms a monobank test 3-D Secure page ([tdsUrl], a saved-card payment monobank wants confirmed): presses
+     * its confirm button until the payment [settled], never a decline.
+     */
+    fun confirm(
+        tdsUrl: String,
+        name: String,
+        settled: () -> Boolean,
+    ) {
+        Files.createDirectories(screenshots)
+        browser.newContext(Browser.NewContextOptions().setLocale("en-US")).use { context ->
+            val page = context.newPage()
+            page.navigate(tdsUrl)
+            page.waitForLoadState()
+            page.screenshot(Page.ScreenshotOptions().setPath(screenshots.resolve("$name-1-tds.png")).setFullPage(true))
+            val deadline = System.nanoTime() + PAY_TIMEOUT_NANOS
+            var done = false
+            while (!done && System.nanoTime() < deadline) {
+                dismissDialogs(page)
+                page.waitForTimeout(STEP_WAIT_MS)
+                done = settled()
+            }
+            page.screenshot(
+                Page.ScreenshotOptions().setPath(screenshots.resolve("$name-2-${if (done) "done" else "timeout"}.png")),
+            )
+            check(done) { "the $name 3-D Secure page did not settle within ${PAY_TIMEOUT_NANOS / 1_000_000_000} s" }
+        }
+    }
+
     /** Clicks every visible confirm / acknowledge button once; true when one was clicked. */
     private fun dismissDialogs(page: Page): Boolean {
         var clicked = false

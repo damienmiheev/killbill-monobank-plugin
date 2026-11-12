@@ -171,15 +171,14 @@ class PaymentService(
         val settings =
             settings(op)
                 ?: return ChargeRefusal(refused(op, CONFIG_INVALID, "the tenant's monobank settings are not valid"))
-        val money =
-            money(op, settings) ?: return ChargeRefusal(refused(op, INVALID_AMOUNT, "amount or currency not allowed"))
-        // monobank documents and enforces UAH-only holds for payment pages (live: 1001 "hold payments are allowed
-        // only for UAH"); for a saved card it documents no limit, so monobank's answer decides.
-        if (op.type == TransactionType.AUTHORIZE && op.properties.flag(Properties.HOSTED) &&
-            money.currency.currencyCode != UAH
-        ) {
-            return ChargeRefusal(refused(op, INVALID_AMOUNT, "monobank holds payment pages only in UAH"))
+        // monobank converts USD and EUR to hryvnia when paid and cannot refund such saved-card payments in full (seen
+        // live), so the plugin takes UAH only; accounts in other currencies use another payment plugin.
+        if (op.currency != null && op.currency.name != UAH) {
+            return ChargeRefusal(
+                refused(op, CURRENCY_NOT_SUPPORTED, "monobank payments are UAH only, not ${op.currency.name}"),
+            )
         }
+        val money = money(op) ?: return ChargeRefusal(refused(op, INVALID_AMOUNT, "invalid amount or currency"))
         val destination = op.properties.string(Properties.DESTINATION) ?: settings.destination ?: DEFAULT_DESTINATION
         val callerBasket = op.properties.string(Properties.BASKET_ORDER)
         val basket =
@@ -1056,16 +1055,11 @@ class PaymentService(
     private fun settings(op: Operation): TenantSettings? =
         (tenants.get(op.tenantId) as? TenantSettings.ParseResult.Valid)?.settings
 
-    private fun money(
-        op: Operation,
-        settings: TenantSettings,
-    ): Money? {
+    private fun money(op: Operation): Money? {
         val amount = op.amount ?: return null
         val currency = op.currency ?: return null
         return try {
-            val javaCurrency = Money.currency(currency.name)
-            if (javaCurrency !in settings.allowedCurrencies) return null
-            Money.ofMajor(amount, javaCurrency).takeIf { it.minor > 0 }
+            Money.ofMajor(amount, Money.currency(currency.name)).takeIf { it.minor > 0 }
         } catch (e: InvalidAmountException) {
             LOG.info("Refused {} for transaction {}: {}", op.type, op.transactionId, e.message)
             null
@@ -1110,6 +1104,7 @@ class PaymentService(
         const val INVALID_BASKET = "INVALID_BASKET"
         const val CANCELED_BY_MERCHANT = "CANCELED_BY_MERCHANT"
         const val CAPTURE_SETTLING = "CAPTURE_SETTLING"
+        const val CURRENCY_NOT_SUPPORTED = "CURRENCY_NOT_SUPPORTED"
         private const val ORDER_NOT_FINISHED = "1004"
         private const val ORDER_NOT_FINISHED_TEXT = "order not finished"
 

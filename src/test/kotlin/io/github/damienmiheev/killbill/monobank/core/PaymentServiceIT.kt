@@ -440,28 +440,54 @@ class PaymentServiceIT : ServiceHarness() {
     }
 
     @Test
-    fun `a euro page paid in another currency is held for review, never settled as paid`() {
-        val eur =
-            op(TransactionType.PURCHASE, UUID.randomUUID(), UUID.randomUUID(), null, "15.50", "hosted" to "true")
-                .copy(currency = Currency.EUR)
-        val page = stored(payments.charge(eur))
-        val invoice = fake.invoice(page.invoiceId!!)!!
-        assertThat(invoice.ccy).isEqualTo(978)
-        assertThat(invoice.amount).isEqualTo(1550L)
+    fun `a page monobank reports in another currency is held for review, never settled as paid`() {
+        val page =
+            stored(
+                payments.charge(
+                    op(
+                        TransactionType.PURCHASE,
+                        UUID.randomUUID(),
+                        UUID.randomUUID(),
+                        null,
+                        "15.50",
+                        "hosted" to "true",
+                    ),
+                ),
+            )
+        assertThat(fake.invoice(page.invoiceId!!)!!.ccy).isEqualTo(980)
         fake.setWebhookDelivery(WebhookDelivery.MANUAL)
         fake.payInvoice(page.invoiceId)
         fake.dropPendingWebhooks { true }
 
-        val inHryvnia =
+        val inDollars =
             fake
                 .invoice(page.invoiceId)!!
                 .statusJson
-                .replace("\"ccy\":978", "\"ccy\":980")
-        assertThat(inHryvnia).contains("\"ccy\":980")
-        handler.handle(inHryvnia.toByteArray(), fake.signer.sign(inHryvnia), null)
+                .replace("\"ccy\":980", "\"ccy\":840")
+        assertThat(inDollars).contains("\"ccy\":840")
+        handler.handle(inDollars.toByteArray(), fake.signer.sign(inDollars), null)
 
         val held = transactions.findByRecord(page.recordId)!!
         assertThat(held.state).isEqualTo(TxState.REVIEW)
         assertThat(settled.map { it.recordId }).doesNotContain(page.recordId)
+    }
+
+    @Test
+    fun `a payment in any currency but hryvnia is refused before monobank is called`() {
+        val (account, pm) = cardHolder()
+        val before = fake.requests().size
+        for (currency in listOf(Currency.EUR, Currency.USD, Currency.GBP)) {
+            for (hosted in listOf(true, false)) {
+                for (type in listOf(TransactionType.PURCHASE, TransactionType.AUTHORIZE)) {
+                    val props = if (hosted) arrayOf("hosted" to "true") else emptyArray()
+                    val answer =
+                        payments.charge(
+                            op(type, account, UUID.randomUUID(), pm, "5.00", *props).copy(currency = currency),
+                        )
+                    assertThat(refusalCode(answer)).isEqualTo(PaymentService.CURRENCY_NOT_SUPPORTED)
+                }
+            }
+        }
+        assertThat(fake.requests().size).isEqualTo(before)
     }
 }

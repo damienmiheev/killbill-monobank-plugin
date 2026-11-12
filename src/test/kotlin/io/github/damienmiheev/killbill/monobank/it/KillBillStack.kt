@@ -268,7 +268,6 @@ class KillBillStack(
             org.killbill.billing.plugin.monobank.merchantToken=env:it
             org.killbill.billing.plugin.monobank.webhookUrl=$webhookUrl
             org.killbill.billing.plugin.monobank.redirectUrl=https://shop.example/return
-            org.killbill.billing.plugin.monobank.allowedCurrencies=UAH,EUR,USD
             """.trimIndent() + "\n" + extraConfig,
         )
         return tenant

@@ -48,20 +48,8 @@ class TenantSettingsTest {
         assertThat(s.merchantToken.reveal()).isEqualTo("tok")
         assertThat(s.webhookUrl.toString()).isEqualTo("https://example.com/hook")
         assertThat(s.language).isEqualTo("uk")
-        assertThat(s.allowedCurrencies.map { it.currencyCode }).containsExactly("UAH")
         assertThat(s.checkoutValiditySeconds).isEqualTo(3600)
         assertThat(s.redirectUrl).isNull()
-    }
-
-    @Test
-    fun `several currencies are allowed`() {
-        val s =
-            valid(
-                "${prefix}merchantToken=tok",
-                "${prefix}webhookUrl=https://example.com/hook",
-                "${prefix}allowedCurrencies= uah, USD ,EUR",
-            )
-        assertThat(s.allowedCurrencies.map { it.currencyCode }).containsExactlyInAnyOrder("UAH", "USD", "EUR")
     }
 
     @Test
@@ -140,48 +128,15 @@ class TenantSettingsTest {
                 "${prefix}webhookUrl=ftp://example.com",
                 "${prefix}redirectUrl=not a url",
                 "${prefix}language=de",
-                "${prefix}allowedCurrencies=UAH,NOPE",
                 "${prefix}checkoutValiditySeconds=5",
             )
-        assertThat(errs).hasSize(5)
+        assertThat(errs).hasSize(4)
         assertThat(errs.joinToString()).doesNotContain("super-secret-token")
     }
 
     @Test
     fun `required keys`() {
         assertThat(errors("")).containsExactlyInAnyOrder("merchantToken is required", "webhookUrl is required")
-    }
-
-    @Test
-    fun `currencies without a minor unit are refused`() {
-        val errs =
-            errors(
-                "${prefix}merchantToken=tok",
-                "${prefix}webhookUrl=https://example.com/hook",
-                "${prefix}allowedCurrencies=XAU",
-            )
-        assertThat(errs).anyMatch { it.startsWith("allowedCurrencies") }
-    }
-
-    @Test
-    fun `only the currencies monobank accepts can be allowed`() {
-        val errs =
-            errors(
-                "${prefix}merchantToken=tok",
-                "${prefix}webhookUrl=https://example.com/hook",
-                "${prefix}allowedCurrencies=UAH,GBP,PLN",
-            )
-        assertThat(errs).containsExactly(
-            "allowedCurrencies: monobank accepts only UAH, USD, EUR, not GBP",
-            "allowedCurrencies: monobank accepts only UAH, USD, EUR, not PLN",
-        )
-        val all =
-            valid(
-                "${prefix}merchantToken=tok",
-                "${prefix}webhookUrl=https://example.com/hook",
-                "${prefix}allowedCurrencies=UAH,USD,EUR",
-            )
-        assertThat(all.allowedCurrencies.map { it.currencyCode }).containsExactlyInAnyOrder("UAH", "USD", "EUR")
     }
 
     @Test

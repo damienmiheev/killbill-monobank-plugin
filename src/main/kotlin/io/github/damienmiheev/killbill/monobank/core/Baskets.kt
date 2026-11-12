@@ -204,7 +204,7 @@ object Baskets {
 
     private const val MAX_NAME = 128
 
-    // UAH, USD and EUR (all monobank accepts) have two decimals: one unit is 100 minor units.
+    // UAH (the only currency the plugin takes) has two decimals: one unit is 100 minor units.
     private const val UNIT_SCALE = 2
     private const val UNIT_MINOR = 100L
 }

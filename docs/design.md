@@ -36,14 +36,9 @@ It maps Kill Bill's payment API onto monobank with **one Kill Bill transaction p
 
 Kill Bill drives recurring billing; the plugin only moves money.
 
-**Multi-currency.** Every payment carries its own currency from Kill Bill, and the plugin supports any ISO 4217 currency that monobank accepts for the merchant:
-- The currency is sent as its ISO 4217 numeric code (`ccy`), taken from `java.util.Currency`, not from a hand-written table.
-- Amounts are converted with the currency's own minor-unit exponent (`getDefaultFractionDigits`: 2 for UAH, USD and EUR, 0 for JPY, 3 for KWD), never an assumed 2. An amount with more decimals than its currency allows is refused (CANCELED), never rounded.
-- A tenant lists the currencies its monobank contract allows (`allowedCurrencies`, default `UAH`). Anything else is refused before calling monobank, never silently charged in hryvnia.
-- Holds: monobank documents and enforces UAH-only holds for payment pages (live: `1001` "hold payments are allowed only for UAH"), so a hosted AUTHORIZE in another currency is refused before any call. For a saved card monobank documents no limit, so a hold in EUR is sent and monobank's answer decides.
-- CAPTURE, VOID and REFUND must use the currency of the transaction they act on. A webhook or status whose `ccy` differs from the row's goes to REVIEW.
-- Saved cards are not tied to a currency: one card can be charged in any allowed currency.
-- Whether monobank accepts a currency for a given merchant (and for tokenised charges) is a matter of the merchant's contract. The plugin reports monobank's refusal as a decline with its code.
+**Hryvnia only.** The plugin takes UAH only (owner's decision, 2026-11-12). monobank accepts UAH, USD and EUR, but converts USD and EUR to hryvnia when they are paid (Ukrainian law; seen live: 1.00 EUR became 50.48 UAH), and a converted saved-card payment cannot be refunded in full (seen live by the SDK: refunds are checked against the euro basket while the money is hryvnia). A payment in any other currency is refused before calling monobank (`CURRENCY_NOT_SUPPORTED`, CANCELED → PLUGIN_FAILURE); accounts in other currencies use another payment plugin (for example Stripe).
+- The currency is still sent as its ISO 4217 numeric code (`ccy`) and amounts use the currency's minor-unit exponent, in one place (`Money`), so nothing assumes 2 decimals.
+- CAPTURE, VOID and REFUND must use the currency of the transaction they act on (so a USD or EUR payment made before the plugin became UAH-only can still be captured, voided or refunded). A webhook or status whose `ccy` differs from the row's goes to REVIEW.
 
 ## A2. Platform, language, build
 
@@ -153,7 +148,7 @@ monobank documents **no idempotency key**. Two calls with the same `reference` o
 | `success` (PURCHASE, CAPTURE, REFUND), `hold` (AUTHORIZE) | SUCCESS | PROCESSED |
 | `created` / `processing`, a hosted `formUrl`, or a `tdsUrl` | PENDING | PENDING |
 | `failure` or `expired`, a card decline, `TOKEN_NOT_FOUND`, `NO_ACTIVE_CARD` | FAILED | **ERROR → PAYMENT_FAILURE**, with the code |
-| The request was refused for our own reasons: HTTP 4xx validation, currency not allowed, more decimals than the currency allows, `PREVIOUS_CHARGE_UNRESOLVED`, missing config | CANCELED | **CANCELED → PLUGIN_FAILURE** |
+| The request was refused for our own reasons: HTTP 4xx validation, a currency other than UAH, more decimals than the currency allows, `PREVIOUS_CHARGE_UNRESOLVED`, missing config | CANCELED | **CANCELED → PLUGIN_FAILURE** |
 | The request **was not sent**: connect refused, DNS or TLS handshake failure | CANCELED | CANCELED → PLUGIN_FAILURE (safe to retry) |
 | The request **may have been sent** with no answer: read timeout, reset after the write, HTTP 5xx | UNKNOWN | **UNDEFINED → UNKNOWN**, never a failure |
 | The amount or currency monobank reports doesn't match the row | REVIEW | UNDEFINED → UNKNOWN, plus an alert |
@@ -307,7 +302,6 @@ The database is reachable, the tables are present and the reconcile job has run 
 | `merchantToken` | yes | monobank's `X-Token`. Either the value itself (stored in Kill Bill's database) or `env:<alias>`, which reads the environment variable `MONOBANK_MERCHANT_TOKEN_<ALIAS>` of the Kill Bill process, **only if the operator bound that alias to this tenant** (system setting `merchantTokenBindings`). A tenant can't point the plugin at any other variable or at another tenant's token, and the error is the same whether such a variable exists or not. |
 | `webhookUrl` | yes | The public URL monobank calls. Without it the plugin refuses to create monobank payments. |
 | `redirectUrl`, `destination`, `language` | no | Defaults for hosted pages (`language` `uk`). |
-| `allowedCurrencies` | no | Comma-separated ISO 4217 codes the merchant's monobank contract allows. Default `UAH`. Anything else is refused before calling monobank. |
 | `checkoutValiditySeconds` | no | Default 3600. |
 
 There is no global fallback token. A tenant without valid config can't make payments and reports unhealthy.
@@ -400,7 +394,7 @@ Cases:
 - payment method deletion, including the same card saved twice;
 - an unexpected reversal;
 - two Kill Bill nodes running the reconcile job at once → one charge, one settle;
-- payments in UAH and USD on one account, and a refund in the wrong currency refused;
+- payments in EUR or USD refused before monobank is called, and a capture or refund in the wrong currency refused;
 - a tenant without config.
 
 **Live tests against monobank's test mode.** monobank gives a test token, so the whole plugin is also tested against the real API, and production only changes the token.
