@@ -1,5 +1,9 @@
 # Kill Bill monobank plugin
 
+[![CodeQL](https://github.com/damienmiheev/killbill-monobank-plugin/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/damienmiheev/killbill-monobank-plugin/actions/workflows/codeql.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/damienmiheev/killbill-monobank-plugin/badge)](https://scorecard.dev/viewer/?uri=github.com/damienmiheev/killbill-monobank-plugin)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 A [Kill Bill](https://killbill.io) payment plugin for [monobank](https://monobank.ua) internet acquiring (Ukraine).
 
 > **Status: under construction (0.1.0-SNAPSHOT).** The bundle loads, checks its schema and settings and reports

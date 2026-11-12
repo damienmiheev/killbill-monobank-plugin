@@ -1,0 +1,40 @@
+name: Dependency graph
+
+# GitHub's static Maven graph sees only what pom.xml declares. This submits the full resolved tree (transitive
+# dependencies and versions inherited from Kill Bill's parent) from main, so Dependabot alerts and dependency
+# review cover everything the bundle embeds and the build uses.
+on:
+  push:
+    branches: [main]
+    paths:
+      - pom.xml
+      - .mvn/**
+      - .github/workflows/dependency-graph.yml
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: dependency-graph
+  cancel-in-progress: true
+
+jobs:
+  submit:
+    name: submit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write # the dependency submission API
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: advanced-security/maven-dependency-submission-action@a64327a7329c9939cf675e458452febe1894a70c # v6.0.1
+        with:
+          maven-args: -B -ntp
