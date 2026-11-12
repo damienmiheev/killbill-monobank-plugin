@@ -60,6 +60,7 @@ data class TxRow(
     val tdsUrl: String?,
     val expiresAt: Instant?,
     val saveCard: Boolean,
+    val basket: String?,
     val attemptedAt: Instant?,
     val nextCheckAt: Instant?,
     val createdAt: Instant,
@@ -95,6 +96,8 @@ data class NewTx(
     val amountMinor: Long,
     val currency: String,
     val saveCard: Boolean,
+    /** The receipt items sent with a charge (JSON), or null when none were sent. */
+    val basket: String? = null,
 )
 
 /** One change to a row, applied only if the row is still in one of the expected states. */
@@ -132,8 +135,9 @@ class TransactionDao(
                         """
                         insert into monobank_transactions (kb_tenant_id, kb_account_id, kb_payment_id, kb_payment_method_id,
                             kb_invoice_id, kb_transaction_id, transaction_type, reference, caller_ref, invoice_id,
-                            amount_minor, currency, state, save_card, attempted_at, next_check_at, created_at, updated_at)
-                        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SENDING', ?, ?, ?, ?, ?)
+                            amount_minor, currency, state, save_card, basket, attempted_at, next_check_at, created_at,
+                            updated_at)
+                        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SENDING', ?, ?, ?, ?, ?, ?)
                         returning *
                         """.trimIndent(),
                         tx.tenantId,
@@ -149,6 +153,7 @@ class TransactionDao(
                         tx.amountMinor,
                         tx.currency,
                         tx.saveCard,
+                        tx.basket,
                         at,
                         at,
                         at,
@@ -355,6 +360,7 @@ class TransactionDao(
                 tdsUrl = rs.getString("tds_url"),
                 expiresAt = rs.instant("expires_at"),
                 saveCard = rs.getBoolean("save_card"),
+                basket = rs.getString("basket"),
                 attemptedAt = rs.instant("attempted_at"),
                 nextCheckAt = rs.instant("next_check_at"),
                 createdAt = rs.instant("created_at")!!,

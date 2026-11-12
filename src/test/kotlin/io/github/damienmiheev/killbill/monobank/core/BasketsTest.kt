@@ -27,7 +27,7 @@ class BasketsTest {
     }
 
     @Test
-    fun `a split receiver gives a one-item basket for the whole amount`() {
+    fun `a split receiver gives one item priced at one unit, the amount as its quantity`() {
         val items =
             Baskets.single(
                 settings("org.killbill.billing.plugin.monobank.splitReceiverId=rcv-1"),
@@ -35,7 +35,9 @@ class BasketsTest {
                 229000,
             )!!
         assertThat(items).hasSize(1)
-        assertThat(items[0].sum).isEqualTo(229000)
+        assertThat(items[0].sum).isEqualTo(100)
+        assertThat(items[0].qty).isEqualByComparingTo("2290.00")
+        assertThat(items[0].total).isEqualTo(229000)
         assertThat(items[0].splitReceiverId).isEqualTo("rcv-1")
         assertThat(items[0].code).isEqualTo("payment")
     }
@@ -54,18 +56,37 @@ class BasketsTest {
     }
 
     @Test
-    fun `captures and refunds carry no items when the tenant uses no receipts, one item when it does`() {
-        assertThat(Baskets.forOperation(settings(), "Plan", null, 1500)).isNull()
-        val items =
-            Baskets.forOperation(
-                settings("org.killbill.billing.plugin.monobank.splitReceiverId=rcv-1"),
-                "Plan",
-                null,
-                1500,
-            )!!
-        assertThat(
-            items.map { Triple(it.sum, it.qty.toInt(), it.splitReceiverId) },
-        ).containsExactly(Triple(1500L, 1, "rcv-1"))
+    fun `a capture or refund repeats the charge's default item with the amount as its quantity`() {
+        val charge =
+            Baskets.toJson(
+                Baskets.single(settings("org.killbill.billing.plugin.monobank.splitReceiverId=rcv-1"), "Plan", 200),
+            )
+        assertThat(Baskets.forOperation(null, null, 150)).isNull()
+
+        val partial = Baskets.forOperation(null, charge, 150)!!.single()
+        assertThat(partial.name).isEqualTo("Plan")
+        assertThat(partial.code).isEqualTo("payment")
+        assertThat(partial.sum).isEqualTo(100) // the hold's unit price: monobank matches name, code, sum, receiver
+        assertThat(partial.qty).isEqualByComparingTo("1.50")
+        assertThat(partial.splitReceiverId).isEqualTo("rcv-1")
+        assertThat(Baskets.forOperation(null, charge, 1)!!.single().qty).isEqualByComparingTo("0.01")
+    }
+
+    @Test
+    fun `a charge with the caller's own items is repeated in full, and a partial one needs the caller's basket`() {
+        val own =
+            Baskets.toJson(
+                Baskets.fromProperty(
+                    """[{"name":"Audit","qty":1,"sum":1000,"code":"audit"},""" +
+                        """{"name":"Fee","qty":2,"sum":145,"code":"fee"}]""",
+                    1290,
+                ),
+            )
+        assertThat(Baskets.forOperation(null, own, 1290)!!.map { it.code to it.qty.toInt() })
+            .containsExactly("audit" to 1, "fee" to 2)
+        assertThatThrownBy { Baskets.forOperation(null, own, 145) }.hasMessageContaining("needs a basketOrder")
+        val feeOnly = """[{"name":"Fee","qty":1,"sum":145,"code":"fee"}]"""
+        assertThat(Baskets.forOperation(feeOnly, own, 145)!!.single().code).isEqualTo("fee")
     }
 
     @Test

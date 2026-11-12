@@ -160,6 +160,7 @@ class PaymentService(
                 amountMinor = money.minor,
                 currency = money.currency.currencyCode,
                 saveCard = hosted && op.properties.flag(Properties.SAVE_CARD),
+                basket = Baskets.toJson(basket),
             )
     }
 
@@ -414,7 +415,7 @@ class PaymentService(
                 }
             if (refusal != null) return@followUp FollowUp.Refuse(INVALID_OPERATION, refusal)
             val items =
-                when (val checked = operationItems(op, settings, money)) {
+                when (val checked = operationItems(op, auth?.basket, money)) {
                     is ItemsCheck.Invalid -> return@followUp FollowUp.Refuse(INVALID_BASKET, checked.reason)
                     is ItemsCheck.Valid -> checked.items
                 }
@@ -480,7 +481,7 @@ class PaymentService(
                 }
             if (refusal != null) return@followUp FollowUp.Refuse(INVALID_OPERATION, refusal)
             val items =
-                when (val checked = operationItems(op, settings, money)) {
+                when (val checked = operationItems(op, chargeBasket(rows), money)) {
                     is ItemsCheck.Invalid -> return@followUp FollowUp.Refuse(INVALID_BASKET, checked.reason)
                     is ItemsCheck.Valid -> checked.items
                 }
@@ -508,25 +509,28 @@ class PaymentService(
         ) : ItemsCheck
     }
 
+    /** The basket the refunded money was charged with: the purchase's, or the hold's for a captured hold. */
+    private fun chargeBasket(rows: List<TxRow>): String? =
+        rows.firstOrNull { it.type == TransactionType.PURCHASE }?.basket
+            ?: rows.firstOrNull { it.type == TransactionType.AUTHORIZE }?.basket
+
     /**
-     * Receipt items for a capture or refund (empty when the tenant uses none). monobank refuses a partial amount
-     * without them on a merchant with receipts or split payments. A purchase split between several receivers needs
-     * the caller's `basketOrder` on its refunds too; otherwise the tenant's one receiver is named.
+     * Receipt items for a capture or refund (empty when the charge sent none), built from the charge's own items:
+     * monobank refuses an item that is not in the charge's basket and a partial amount without items on a merchant
+     * with receipts or split payments (both seen live).
      */
     private fun operationItems(
         op: Operation,
-        settings: TenantSettings,
+        chargeBasket: String?,
         money: Money,
-    ): ItemsCheck {
-        val name = op.properties.string(Properties.DESTINATION) ?: settings.destination ?: DEFAULT_DESTINATION
-        return try {
+    ): ItemsCheck =
+        try {
             val json = op.properties.string(Properties.BASKET_ORDER)
-            ItemsCheck.Valid(Baskets.forOperation(settings, name, json, money.minor).orEmpty())
+            ItemsCheck.Valid(Baskets.forOperation(json, chargeBasket, money.minor).orEmpty())
         } catch (e: IllegalArgumentException) {
             LOG.info("Refused {} for transaction {}: {}", op.type, op.transactionId, e.message)
             ItemsCheck.Invalid(e.message ?: "invalid basketOrder")
         }
-    }
 
     /** Idempotency, settings, the plan, the claim and the single call, shared by capture, void and refund. */
     private fun followUp(

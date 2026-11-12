@@ -28,6 +28,8 @@ create table monobank_transactions (
     tds_url                text,
     expires_at             timestamptz,
     save_card              boolean      not null default false,
+    -- the receipt items sent with a charge; a partial capture or refund may change only their quantities
+    basket                 text,
     attempted_at           timestamptz,
     next_check_at          timestamptz,
     next_settle_at         timestamptz,
