@@ -75,6 +75,27 @@ jobs:
             if [ -z "${!name}" ]; then echo "::error::Secret $name is not set in environment maven-central"; exit 1; fi
           done
 
+      # Seconds, not a full build: the Central Portal accepts this user token, and this version isn't published yet.
+      - name: The Central token works and the version is new
+        env:
+          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+          CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          auth="$(printf '%s:%s' "$CENTRAL_USERNAME" "$CENTRAL_PASSWORD" | base64 | tr -d '\n')"
+          code="$(curl -sS -o answer.json -w '%{http_code}' -H "Authorization: Bearer $auth" \
+            "https://central.sonatype.com/api/v1/publisher/published?namespace=io.github.damienmiheev&name=killbill-monobank-plugin&version=${version}")"
+          case "$code" in
+            200) ;;
+            401|403) echo "::error::The Central Portal refused the token ($code): set a Portal user token, not the login"; exit 1;;
+            *) echo "::error::The Central Portal answered $code"; exit 1;;
+          esac
+          if jq -e '.published == true' answer.json > /dev/null; then
+            echo "::error::${version} is already published on Maven Central"; exit 1
+          fi
+          rm -f answer.json
+
       # Writes ~/.m2/settings.xml with server `central` (credentials from the env below). The signing key never
       # touches a keyring: maven-gpg-plugin signs in Maven from MAVEN_GPG_KEY (see the pom's release profile).
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0

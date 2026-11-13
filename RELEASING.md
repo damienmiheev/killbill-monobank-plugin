@@ -32,8 +32,10 @@ passes are clean.
      approval) and `monobank-test`
      (only `main`; it runs the nightly live suite, so it has no reviewer).
 3. Secrets of the `maven-central` environment (Settings → Environments, or `gh secret set NAME --env maven-central`):
-   - `CENTRAL_USERNAME`, `CENTRAL_PASSWORD`: the Central Portal user token;
-   - `GPG_SIGNING_KEY`: the ASCII-armored private key (`gpg --armor --export-secret-keys <KEY_ID>`);
+   - `CENTRAL_USERNAME`, `CENTRAL_PASSWORD`: a Central Portal **user token** (Account → Generate User Token), never
+     the Portal login: the upload answers 401 to a login;
+   - `GPG_SIGNING_KEY`: the ASCII-armored private key (`gpg --armor --export-secret-keys <KEY_ID>`), signed with in
+     Maven (maven-gpg-plugin's Bouncy Castle signer: no gpg program in CI);
    - `GPG_SIGNING_PASSWORD`: its passphrase.
    The public key is on a keyserver (`gpg --keyserver keys.openpgp.org --send-keys <KEY_ID>`).
 4. Secrets of the `monobank-test` environment: `MONOBANK_ACQUIRING_TEST_TOKEN` (monobank's test token) and
@@ -56,10 +58,15 @@ On a clean checkout of the release pull request's head (version `X.Y.Z`, not a s
    ```
    It covers hosted and saved-card purchases, holds captured in part and voided, refunds in parts, card saving and
    removal. Note the invoice ids in the release notes draft.
-5. Inspect what will be published: `./mvnw -B -Psonatype-oss-release -Dgpg.skip -DskipTests -DskipITs clean verify`,
-   then `target/` has exactly the bundle jar, `-sources.jar` and `-javadoc.jar` (no test jars); the bundle's manifest
-   imports only what
-   Kill Bill 0.24 exports; the pom has name, description, URL, license, developer and SCM.
+5. Inspect what will be published, before any tag (tags can't be moved, so a failed publish costs a version):
+   build the exact upload without sending it, with dummy credentials (the upload is refused at the end):
+   ```bash
+   printf '<settings><servers><server><id>central</id><username>x</username><password>y</password></server></servers></settings>' > /tmp/dummy.xml
+   ./mvnw -B -s /tmp/dummy.xml -Psonatype-oss-release -Dgpg.skip -DskipTests -DskipITs clean deploy
+   unzip -Z1 target/central-publishing/central-bundle.zip
+   ```
+   It lists only the bundle jar, `-sources.jar`, `-javadoc.jar` and the pom with their checksums (no
+   `maven-metadata*.xml`, no `_remote.repositories`); the bundle's manifest imports only what Kill Bill 0.24 exports.
 6. The bundle installs into a stock Kill Bill 0.24.22 from the built jar and the plugin starts (the integration tests
    do this; check their log for the plugin's start line).
 7. README, `docs/design.md` and the CHANGELOG entry match the release.
@@ -79,7 +86,8 @@ On a clean checkout of the release pull request's head (version `X.Y.Z`, not a s
    ```
 5. Actions → "Publish to Maven Central" → run on tag `vX.Y.Z`. Its `check` job (no secrets) refuses a snapshot, an
    SDK snapshot, a tag that doesn't match the version or isn't on `main`, and re-runs the build checks; then approve
-   the `maven-central` environment for `publish`, which signs, uploads and stops: the deployment
+   the `maven-central` environment for `publish`, which first checks in seconds that the Portal accepts the token and
+   that the version isn't published yet, then signs, uploads and stops: the deployment
    (`killbill-monobank-plugin X.Y.Z`) waits in the Central Portal.
 6. Central Portal → Deployments: drop any older or failed deployment for this version, check the file list once more
    (bundle, sources, javadoc, each with its `.asc`, the pom), then **Publish**.
