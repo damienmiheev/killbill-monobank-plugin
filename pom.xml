@@ -26,7 +26,7 @@
 
     <groupId>io.github.damienmiheev</groupId>
     <artifactId>killbill-monobank-plugin</artifactId>
-    <version>0.1.1</version>
+    <version>0.1.2</version>
     <packaging>bundle</packaging>
 
     <name>Kill Bill monobank plugin</name>
@@ -524,6 +524,9 @@
                     <plugin>
                         <groupId>org.sonatype.central</groupId>
                         <artifactId>central-publishing-maven-plugin</artifactId>
+                        <!-- 0.11.0 (the parent's) bundled Maven 3.10's maven-metadata-local.xml and _remote.repositories,
+                        which the Central Portal refuses -->
+                        <version>0.12.0</version>
                         <configuration>
                             <!-- the maintainer presses Publish in the Central Portal -->
                             <autoPublish>false</autoPublish>
