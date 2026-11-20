@@ -5,6 +5,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-20
+
 ### Added
 
 - `GET /plugins/killbill-monobank/pubkey?refresh=true`: re-reads monobank's webhook key before answering (at most
