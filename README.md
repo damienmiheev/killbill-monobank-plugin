@@ -126,7 +126,9 @@ differ from Kill Bill's transaction status after an operator fixes that status b
 SUCCESS still says `FAILED` (the plugin refuses to refund it, since nothing was charged), and a REVIEW one keeps saying
 `REVIEW` until the reconcile job closes the row in Kill Bill's state. A transaction refused before the plugin stored it
 (for example `CURRENCY_NOT_SUPPORTED`, `NO_ACTIVE_CARD`, `PREVIOUS_CHARGE_UNRESOLVED`) has no plugin info, so no
-`state`: nothing reached monobank for it. The rule for a caller that offers refunds: a payment is refundable only when its PURCHASE (or, for a hold, its CAPTURE) carries `state` = `SUCCESS`; a missing `state` or any other value is not refundable.
+`state`: nothing reached monobank for it. The rule for a caller that offers refunds: a payment is refundable only when
+its PURCHASE (or, for a hold, its CAPTURE) carries `state` = `SUCCESS`; a missing `state` or any other value is not
+refundable.
 
 Routes under `/plugins/killbill-monobank/`:
 
