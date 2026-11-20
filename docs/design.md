@@ -243,7 +243,7 @@ Calls to monobank back off on HTTP 429. Statement reads are single-flight per te
 
 ## A7. Plugin HTTP endpoints and webhooks
 
-Kill Bill serves plugin routes under `/plugins/killbill-monobank/` on its own port. **Kill Bill authentication is optional there** (verified: `KillBillShiroWebModule` puts `/plugins/**` behind an optional-auth filter), so each route decides for itself. There are three routes, and nothing else.
+Kill Bill serves plugin routes under `/plugins/killbill-monobank/` on its own port. **Kill Bill authentication is optional there** (verified: `KillBillShiroWebModule` puts `/plugins/**` behind an optional-auth filter), so each route decides for itself. There are four routes, and nothing else.
 
 ### `POST /notification`: monobank's webhook
 
@@ -275,6 +275,16 @@ It uses its own route, not Kill Bill's `/1.0/kb/paymentGateways/notification`, b
   - **Anything else** (monobank did not answer, or the page is in no state that says either): **503**, ask again.
   - Settling runs on the reconcile job's thread: the settler logs in as the plugin's own Kill Bill user, which must not replace the caller's session.
 - It is idempotent: a second call returns the current state.
+
+### `GET /pubkey`: monobank's webhook key, for a forwarder
+
+An application that receives monobank's webhook and forwards it here may want to check `X-Sign` before forwarding, without holding the merchant token itself. This route gives it the key.
+
+- **Requires Kill Bill authentication** (Basic auth plus the tenant's API key and secret); no permission beyond that. Without it: **401**.
+- Answers **200** with `{"key": "…"}`: monobank's current webhook public key for that tenant's merchant, as monobank gives it (base64), the same key the plugin checks `X-Sign` with.
+- **503** when the tenant's config is not valid or monobank's key can't be had right now. Ask again later.
+- The key is the one the plugin has loaded, not read from monobank per request. The plugin reads it again only when a webhook fails to verify here. So after monobank rotates its key, a forwarder that drops what fails its own check keeps getting the old key until a webhook reaches the plugin (or the plugin restarts). Such a forwarder should forward anyway, or rely on the reconcile job (A6) meanwhile.
+- The key is public, so this is a convenience, not a secret. The plugin still verifies every webhook itself (step 4 above), whatever the forwarder did.
 
 ### `GET /healthcheck`
 
@@ -331,7 +341,7 @@ There is no global fallback token. A tenant without valid config can't make paym
 | Money | A paid invoice left unpaid in Kill Bill | Settling goes through the payment control plugins (A6); there is a test asserting the invoice balance reaches 0. |
 | Card token | Leaks through Kill Bill APIs, logs, backups | A8: encrypted and bound to its row, never returned or logged, bodies not stored. |
 | Merchant token | Leaks from Kill Bill's database or backups | `env:<alias>` keeps it out of the database; never logged; health shows only "configured". |
-| Plugin routes | Called by anyone who can reach Kill Bill's port | Unauthenticated routes are only `notification` (signature, optional shared secret, 64 KB limit) and `healthcheck` (no data). `cancel` requires Kill Bill authentication. Operators shouldn't expose Kill Bill publicly. |
+| Plugin routes | Called by anyone who can reach Kill Bill's port | Unauthenticated routes are only `notification` (signature, optional shared secret, 64 KB limit) and `healthcheck` (no data). `cancel` and `pubkey` require Kill Bill authentication. Operators shouldn't expose Kill Bill publicly. |
 | Kill Bill | The plugin's user misused | Its role has only `payment:transition`; credentials are system config, not tenant config. |
 | Cross-tenant | A webhook applied to another tenant, or a tenant using another's token | The tenant comes from the row found by the opaque reference, verified with that tenant's key, and the invoice ID must match. `env:` reads only `MONOBANK_MERCHANT_TOKEN_<alias>` and only for the alias the operator bound to that tenant's API key. |
 
