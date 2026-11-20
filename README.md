@@ -119,8 +119,13 @@ Plugin properties (`pluginProperty=key=value` on Kill Bill's payment calls):
 | `basketOrder` | A JSON array of `{name, qty, sum, code}` (plus `splitReceiverId`, `unit`, `tax`, `uktzed`) adding up to the amount. |
 | `initiationKind=client` | A saved-card charge made with the customer present (default `merchant`). |
 
-Transactions return `formUrl`, `tdsUrl` (3-D Secure), `invoiceId`, `expiresAt`, `callerRef` and `reference` as plugin
-properties.
+Transactions return `formUrl`, `tdsUrl` (3-D Secure), `invoiceId`, `expiresAt`, `callerRef`, `reference` and `state` as
+plugin properties. `state` is the plugin's own state of the transaction: `SENDING`, `PENDING`, `UNKNOWN`, `REVIEW`,
+`SUCCESS`, `FAILED` or `CANCELED` (see the design, A4). It can differ from Kill Bill's transaction status, for example
+after an operator fixes a failed transaction to SUCCESS by hand: the plugin then still says `FAILED` and refuses to
+refund it, so check `state` before offering a refund. A transaction refused before the plugin stored it (for example
+`CURRENCY_NOT_SUPPORTED`, `NO_ACTIVE_CARD`, `PREVIOUS_CHARGE_UNRESOLVED`) has no plugin info, so no `state`: nothing
+reached monobank for it.
 
 Routes under `/plugins/killbill-monobank/`:
 

@@ -353,15 +353,7 @@ class MonobankPaymentPluginApi(
         }
 
     private fun result(row: TxRow): PaymentTransactionInfoPlugin {
-        val properties =
-            listOfNotNull(
-                row.formUrl?.let { PluginProperty(Properties.FORM_URL, it, false) },
-                row.tdsUrl?.let { PluginProperty(Properties.TDS_URL, it, false) },
-                row.invoiceId?.let { PluginProperty(Properties.INVOICE_ID, it, false) },
-                row.expiresAt?.let { PluginProperty(Properties.EXPIRES_AT, it.toString(), false) },
-                row.callerRef?.let { PluginProperty(Properties.CALLER_REF, it, false) },
-                PluginProperty(Properties.REFERENCE, row.reference.toString(), false),
-            )
+        val properties = transactionProperties(row)
         val currency = Money.currency(row.currency)
         return TransactionResult(
             row.paymentId,
@@ -483,3 +475,18 @@ private class EmptyPagination<T>(
 
     override fun close() = Unit
 }
+
+/**
+ * The plugin properties returned on a transaction. `state` is the plugin's own row state, which can differ from
+ * Kill Bill's transaction status after an operator fixes that status by hand (design A6).
+ */
+internal fun transactionProperties(row: TxRow): List<PluginProperty> =
+    listOfNotNull(
+        row.formUrl?.let { PluginProperty(Properties.FORM_URL, it, false) },
+        row.tdsUrl?.let { PluginProperty(Properties.TDS_URL, it, false) },
+        row.invoiceId?.let { PluginProperty(Properties.INVOICE_ID, it, false) },
+        row.expiresAt?.let { PluginProperty(Properties.EXPIRES_AT, it.toString(), false) },
+        row.callerRef?.let { PluginProperty(Properties.CALLER_REF, it, false) },
+        PluginProperty(Properties.REFERENCE, row.reference.toString(), false),
+        PluginProperty(Properties.STATE, row.state.name, false),
+    )

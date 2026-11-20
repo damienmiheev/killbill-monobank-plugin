@@ -212,6 +212,30 @@ class KillBillStack(
         tenant: TestTenant,
     ): Response = send(request(path, tenant, auth = true).DELETE())
 
+    /** Kill Bill's admin fix of a transaction's status (what Kaui's "fix state" does), as admin. */
+    fun fixTransactionState(
+        tenant: TestTenant,
+        paymentId: String,
+        transactionId: String,
+        transactionStatus: String,
+        paymentState: String,
+    ): Response =
+        send(
+            request("/1.0/kb/admin/payments/$paymentId/transactions/$transactionId", tenant, auth = true)
+                .header("Content-Type", "application/json")
+                .PUT(
+                    HttpRequest.BodyPublishers.ofString(
+                        JSON.writeValueAsString(
+                            mapOf(
+                                "transactionStatus" to transactionStatus,
+                                "currentPaymentStateName" to paymentState,
+                                "lastSuccessPaymentState" to paymentState,
+                            ),
+                        ),
+                    ),
+                ),
+        )
+
     /** A Kill Bill user with exactly [permissions]; returns its name and password. */
     fun createUser(permissions: List<String>): Pair<String, String> {
         val name = "it-user-${UUID.randomUUID()}"

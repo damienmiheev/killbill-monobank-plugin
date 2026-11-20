@@ -145,10 +145,12 @@ class PaymentFlowIT {
         val withInfo = stack.payment(tenant, paymentId, withPluginInfo = true)
         assertThat(withInfo.status()).isEqualTo("PENDING")
         assertThat(withInfo.prop("formUrl")).startsWith("http")
+        assertThat(withInfo.prop("state")).isEqualTo("PENDING")
         val invoiceId = withInfo.prop("invoiceId")!!
 
         fake.payInvoice(invoiceId)
         val paid = stack.awaitPayment(tenant, paymentId) { it.status() == "SUCCESS" }
+        assertThat(stack.payment(tenant, paymentId, withPluginInfo = true).prop("state")).isEqualTo("SUCCESS")
         assertThat(paid.path("purchasedAmount").decimalValue()).isEqualByComparingTo("2290.00")
         awaitCardActive(tenant, pm)
 
@@ -229,6 +231,45 @@ class PaymentFlowIT {
                     it.status() == "PAYMENT_FAILURE"
                 }.status(),
         ).isEqualTo("PAYMENT_FAILURE")
+    }
+
+    @Test
+    fun `a failed row stays FAILED in plugin info after Kill Bill's status is fixed to SUCCESS by hand`() {
+        val tenant = stack.moneyTenant()
+        val account = stack.createAccount(tenant)
+        val pm = stack.addPaymentMethod(tenant, account)
+        val pending = stack.pay(tenant, account, pm, "PURCHASE", "12.00", properties = mapOf("hosted" to "true"))
+        val paymentId = pending.path("paymentId").asText()
+        fake.failInvoice(stack.payment(tenant, paymentId, withPluginInfo = true).prop("invoiceId")!!)
+        val failed = stack.awaitPayment(tenant, paymentId) { it.status() == "PAYMENT_FAILURE" }
+        assertThat(stack.payment(tenant, paymentId, withPluginInfo = true).prop("state")).isEqualTo("FAILED")
+
+        // An operator fixes Kill Bill's transaction to SUCCESS (Kaui's "fix state"); the plugin's row stays FAILED.
+        val fix =
+            stack.fixTransactionState(
+                tenant,
+                paymentId,
+                failed.tx().path("transactionId").asText(),
+                transactionStatus = "SUCCESS",
+                paymentState = "PURCHASE_SUCCESS",
+            )
+        assertThat(fix.status).describedAs(fix.body).isBetween(200, 299)
+
+        val cancelsBefore = fake.requestCount(MonobankPaths.INVOICE_CANCEL)
+        val fixed = stack.payment(tenant, paymentId, withPluginInfo = true)
+        assertThat(fixed.status()).isEqualTo("SUCCESS")
+        assertThat(fixed.prop("state")).isEqualTo("FAILED")
+        // A second read (Kill Bill's on-the-fly Janitor runs on each) changes neither.
+        val again = stack.payment(tenant, paymentId, withPluginInfo = true)
+        assertThat(again.status()).isEqualTo("SUCCESS")
+        assertThat(again.prop("state")).isEqualTo("FAILED")
+
+        // The plugin refuses to refund it (nothing was charged), which is why a caller checks `state` first.
+        stack.followUp(tenant, paymentId, "REFUND", "12.00")
+        val refund = stack.payment(tenant, paymentId).lastTx()
+        assertThat(refund.path("transactionType").asText()).isEqualTo("REFUND")
+        assertThat(refund.path("status").asText()).isNotEqualTo("SUCCESS")
+        assertThat(fake.requestCount(MonobankPaths.INVOICE_CANCEL)).isEqualTo(cancelsBefore)
     }
 
     @Test
@@ -401,6 +442,7 @@ class PaymentFlowIT {
         val payment = stack.pay(tenant, account, pm, "PURCHASE", "100.00")
         val paymentId = payment.path("paymentId").asText()
         assertThat(payment.status()).isEqualTo("SUCCESS")
+        assertThat(stack.payment(tenant, paymentId, withPluginInfo = true).prop("state")).isEqualTo("SUCCESS")
 
         stack.followUp(tenant, paymentId, "REFUND", "30.00")
         stack.awaitPayment(tenant, paymentId) {

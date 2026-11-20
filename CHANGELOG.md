@@ -5,6 +5,13 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Every transaction's plugin info (`GET /1.0/kb/payments/{id}?withPluginInfo=true`) carries the plugin's own state of
+  the transaction as the property `state` (`SENDING`, `PENDING`, `UNKNOWN`, `REVIEW`, `SUCCESS`, `FAILED`,
+  `CANCELED`). It can differ from Kill Bill's status after a hand fix: a FAILED transaction fixed to SUCCESS in Kill
+  Bill still says `FAILED`, and the plugin refuses to refund it, so a caller checks `state` before offering a refund.
+
 ## [0.1.3] - 2026-11-20
 
 ### Added
