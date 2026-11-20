@@ -184,7 +184,7 @@ monobank documents **no idempotency key**. Two calls with the same `reference` o
    - `destination` (the text on monobank's page and receipt) and `language` (`uk` or `en`, default `uk`);
    - `validitySeconds` (default from config, 3600; monobank's own default is 24 h);
    - `basketOrder` (optional JSON for monobank's fiscal receipts; its total must equal the amount).
-3. The plugin claims the row, calls `invoice/create` (debit or hold, `saveCardData{saveCard, walletId}`, `validity`, `webHookUrl` from tenant config) and returns **PENDING** with the properties `formUrl`, `invoiceId`, `expiresAt` and `callerRef`. The caller sends the customer to `formUrl`.
+3. The plugin claims the row, calls `invoice/create` (debit or hold, `saveCardData{saveCard, walletId}`, `validity`, `webHookUrl` from tenant config) and returns **PENDING** with the properties `formUrl`, `invoiceId`, `expiresAt`, `callerRef`, `reference` and `state` (A6). The caller sends the customer to `formUrl`.
 4. monobank reports the result by webhook (A7) or the plugin polls it (A6).
    - `success` (or `hold` for AUTHORIZE) moves the row to SUCCESS.
    - Separately, `walletData.status = created` stores the encrypted token on that payment method and marks it ACTIVE. The card result may arrive in its own webhook, so the two are applied independently.
@@ -220,6 +220,11 @@ monobank documents **no idempotency key**. Two calls with the same `reference` o
 **`getPaymentInfo`** returns one entry per Kill Bill transaction of the payment, built from `monobank_transactions`.
 - Rows that are PENDING, or UNKNOWN with an invoice ID, are first refreshed from `invoice/status` through the same forward-only update a webhook uses.
 - Kill Bill calls it from its Janitor and whenever a payment is read with `withPluginInfo=true`. A lost webhook is therefore always recoverable by reading the payment.
+- Each entry carries the properties `formUrl`, `tdsUrl`, `invoiceId`, `expiresAt`, `callerRef` (each when set), `reference` and `state`, the row's state (A4) by its name: `SENDING`, `PENDING`, `UNKNOWN`, `REVIEW`, `SUCCESS`, `FAILED` or `CANCELED`.
+- The same properties are on the answers to payment calls (one builder for both).
+- `state` is the plugin's truth, not Kill Bill's. After an operator fixes a FAILED row's Kill Bill transaction to SUCCESS by hand (Kaui's "fix state"; Kill Bill's Janitor leaves a final status alone), the transaction reads SUCCESS with `state` FAILED, and a refund of it is refused (nothing was charged; existing behaviour that `state` makes visible). A REVIEW row fixed in Kill Bill keeps reading REVIEW until the reconcile job closes it in Kill Bill's state (A4).
+- **The rule for callers:** a payment is refundable only when its PURCHASE (or, for a hold, its CAPTURE) carries `state` = `SUCCESS`; a missing `state` or any other value is not refundable.
+- A transaction refused before a row was stored (`Answer.Refused`: for example `CONFIG_INVALID`, `CURRENCY_NOT_SUPPORTED`, the decline `NO_ACTIVE_CARD`, `PREVIOUS_CHARGE_UNRESOLVED`, a refused capture, void or refund) has no row, so no entry and no `state`; nothing reached monobank for it, and its Kill Bill status is PLUGIN_FAILURE or PAYMENT_FAILURE until an operator changes it.
 
 **Settling in Kill Bill** happens when a row is final (SUCCESS or FAILED) but `kb_settled_at` is null. A final state returned to Kill Bill in the synchronous answer counts as settled at once (`kb_settled_at` is set with it), so only asynchronous results wait in this queue.
 1. Read the Kill Bill transaction.
@@ -405,6 +410,7 @@ Cases:
 - a decline; 3-D Secure pending then expired;
 - a bad signature; key rotation; an unknown reference; a mismatched invoice ID;
 - an amount mismatch → REVIEW;
+- plugin info carries each transaction's own `state` (PURCHASE and REFUND, AUTHORIZE and CAPTURE, AUTHORIZE and VOID, a refund PENDING then SUCCESS); a refused transaction has none; a FAILED purchase fixed to SUCCESS in Kill Bill by hand still reads `state` FAILED, and its refund is refused without reaching monobank;
 - payment method deletion, including the same card saved twice;
 - an unexpected reversal;
 - two Kill Bill nodes running the reconcile job at once → one charge, one settle;

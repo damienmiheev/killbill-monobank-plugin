@@ -5,6 +5,15 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- The property `state`: the plugin's own state (`SENDING`, `PENDING`, `UNKNOWN`, `REVIEW`, `SUCCESS`, `FAILED`,
+  `CANCELED`) of every transaction the plugin stored (not ones it refused before calling monobank, which have no
+  plugin info), in plugin info (`GET /1.0/kb/payments/{id}?withPluginInfo=true`) and in the answers to payment calls.
+  It can differ from Kill Bill's status after a hand fix. The plugin already refused to refund a FAILED purchase that
+  was fixed to SUCCESS in Kill Bill; `state` (still `FAILED`) now makes that visible to the caller. A REVIEW row fixed
+  in Kill Bill reads `REVIEW` until the reconcile job closes it. The rule: a payment is refundable only when its PURCHASE (or, for a hold, its CAPTURE) carries `state` = `SUCCESS`; a missing `state` or any other value is not refundable.
+
 ## [0.1.3] - 2026-11-20
 
 ### Added

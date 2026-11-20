@@ -229,6 +229,8 @@ class MonobankLiveIT {
                     .path("status")
                     .asText(),
             ).isEqualTo("SUCCESS")
+            // The plugin's own row state, read live (README "Plugin properties").
+            assertThat(stack.payment(tenant, id, withPluginInfo = true).prop("state")).isEqualTo("SUCCESS")
         }
         // partial capture of the hosted hold: receipt items for 1.50 (monobank refuses it without them)
         stack.followUp(tenant, hold, "CAPTURE", "1.50")

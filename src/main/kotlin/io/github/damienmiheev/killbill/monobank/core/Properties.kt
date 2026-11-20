@@ -43,5 +43,8 @@ class Properties(
         const val INVOICE_ID = "invoiceId"
         const val EXPIRES_AT = "expiresAt"
         const val REFERENCE = "reference"
+
+        /** The plugin's own state of the transaction ([io.github.damienmiheev.killbill.monobank.db.TxState] name). */
+        const val STATE = "state"
     }
 }
