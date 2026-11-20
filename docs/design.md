@@ -283,7 +283,11 @@ An application that receives monobank's webhook and forwards it here may want to
 - **Requires Kill Bill authentication** (Basic auth plus the tenant's API key and secret); no permission beyond that. Without it: **401**.
 - Answers **200** with `{"key": "…"}`: monobank's current webhook public key for that tenant's merchant, as monobank gives it (base64), the same key the plugin checks `X-Sign` with.
 - **503** when the tenant's config is not valid or monobank's key can't be had right now. Ask again later.
-- The key is the one the plugin has loaded, not read from monobank per request. The plugin reads it again only when a webhook fails to verify here. So after monobank rotates its key, a forwarder that drops what fails its own check keeps getting the old key until a webhook reaches the plugin (or the plugin restarts). Such a forwarder should forward anyway, or rely on the reconcile job (A6) meanwhile.
+- The key is the one the plugin has loaded, not read from monobank per request. The plugin reads it again by itself only when a webhook fails to verify here, and a forwarder that drops what fails its own check never lets that happen.
+- **`GET /pubkey?refresh=true`** asks the plugin to re-read the key from monobank first (SDK `refreshPublicKey()`), then answers as above. A forwarder calls it when a signature fails its check: monobank may have rotated the key. Any other value of `refresh` is **400**.
+  - **Limits, per merchant token** (tenants with the same token share one key cache, also with the webhook route): monobank is asked at most once a minute after a successful read, and every 10 s while reads fail. A sooner call gets the loaded key, so a stream of bad signatures can't flood monobank.
+  - **503** when the key can't be re-read now (monobank unreachable, or the back-off after a failed read).
+  - **A 200 doesn't prove the key was just read:** within the minute it is the loaded key. And after a rotation only the plugin still accepts the previous key (for 10 minutes); `/pubkey` gives only the current one. So a forwarder must never drop a webhook that still fails after a refresh: answer monobank **5xx** (monobank delivers it again, and a forged one costs nothing), or forward it and let the plugin decide.
 - The key is public, so this is a convenience, not a secret. The plugin still verifies every webhook itself (step 4 above), whatever the forwarder did.
 
 ### `GET /healthcheck`
@@ -341,7 +345,7 @@ There is no global fallback token. A tenant without valid config can't make paym
 | Money | A paid invoice left unpaid in Kill Bill | Settling goes through the payment control plugins (A6); there is a test asserting the invoice balance reaches 0. |
 | Card token | Leaks through Kill Bill APIs, logs, backups | A8: encrypted and bound to its row, never returned or logged, bodies not stored. |
 | Merchant token | Leaks from Kill Bill's database or backups | `env:<alias>` keeps it out of the database; never logged; health shows only "configured". |
-| Plugin routes | Called by anyone who can reach Kill Bill's port | Unauthenticated routes are only `notification` (signature, optional shared secret, 64 KB limit) and `healthcheck` (no data). `cancel` and `pubkey` require Kill Bill authentication. Operators shouldn't expose Kill Bill publicly. |
+| Plugin routes | Called by anyone who can reach Kill Bill's port | Unauthenticated routes are only `notification` (signature, optional shared secret, 64 KB limit) and `healthcheck` (no data). `cancel` and `pubkey` require Kill Bill authentication; `pubkey?refresh=true` reaches monobank at most once a minute per merchant token (every 10 s while reads fail). Operators shouldn't expose Kill Bill publicly. |
 | Kill Bill | The plugin's user misused | Its role has only `payment:transition`; credentials are system config, not tenant config. |
 | Cross-tenant | A webhook applied to another tenant, or a tenant using another's token | The tenant comes from the row found by the opaque reference, verified with that tenant's key, and the invoice ID must match. `env:` reads only `MONOBANK_MERCHANT_TOKEN_<alias>` and only for the alias the operator bound to that tenant's API key. |
 
