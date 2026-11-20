@@ -9,6 +9,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import io.github.damienmiheev.monobank.testkit.FakeMonobankAcquiring
 import io.github.damienmiheev.monobank.testkit.Fault
 import io.github.damienmiheev.monobank.testkit.MonobankPaths
+import io.github.damienmiheev.monobank.testkit.RefundSettlement
 import io.github.damienmiheev.monobank.testkit.SplitReceiver
 import io.github.damienmiheev.monobank.testkit.WebhookDelivery
 import org.assertj.core.api.Assertions.assertThat
@@ -70,10 +71,17 @@ class PaymentFlowIT {
 
     private fun JsonNode.lastTx(): JsonNode = path("transactions").last()
 
+    /** The plugin's `state` of each transaction, in Kill Bill's order, as "TYPE=STATE". */
+    private fun JsonNode.states(): List<String> =
+        path("transactions").mapIndexed { i, tx -> tx.path("transactionType").asText() + "=" + prop("state", i) }
+
     private fun JsonNode.status(index: Int = 0): String = tx(index).path("status").asText()
 
-    private fun JsonNode.prop(key: String): String? =
-        tx()
+    private fun JsonNode.prop(
+        key: String,
+        index: Int = 0,
+    ): String? =
+        tx(index)
             .path("properties")
             .firstOrNull { it.path("key").asText() == key }
             ?.path("value")
@@ -213,6 +221,10 @@ class PaymentFlowIT {
         assertThat(declined.status()).isEqualTo("PAYMENT_FAILURE")
         assertThat(declined.tx().path("gatewayErrorCode").asText()).isEqualTo("NO_ACTIVE_CARD")
         assertThat(fake.requests().size).isEqualTo(before)
+        // Refused before the plugin stored it: no plugin info, so no `state` (a caller reads that as not refundable).
+        val withInfo = stack.payment(tenant, declined.path("paymentId").asText(), withPluginInfo = true)
+        assertThat(withInfo.status()).isEqualTo("PAYMENT_FAILURE")
+        assertThat(withInfo.prop("state")).isNull()
     }
 
     @Test
@@ -268,8 +280,12 @@ class PaymentFlowIT {
         stack.followUp(tenant, paymentId, "REFUND", "12.00")
         val refund = stack.payment(tenant, paymentId).lastTx()
         assertThat(refund.path("transactionType").asText()).isEqualTo("REFUND")
-        assertThat(refund.path("status").asText()).isNotEqualTo("SUCCESS")
+        assertThat(refund.path("status").asText()).isEqualTo("PLUGIN_FAILURE")
+        assertThat(refund.path("gatewayErrorCode").asText()).isEqualTo("INVALID_OPERATION")
         assertThat(fake.requestCount(MonobankPaths.INVOICE_CANCEL)).isEqualTo(cancelsBefore)
+        // The refused refund was never stored: the purchase still says FAILED, the refund has no state.
+        assertThat(stack.payment(tenant, paymentId, withPluginInfo = true).states())
+            .containsExactly("PURCHASE=FAILED", "REFUND=null")
     }
 
     @Test
@@ -442,13 +458,25 @@ class PaymentFlowIT {
         val payment = stack.pay(tenant, account, pm, "PURCHASE", "100.00")
         val paymentId = payment.path("paymentId").asText()
         assertThat(payment.status()).isEqualTo("SUCCESS")
-        assertThat(stack.payment(tenant, paymentId, withPluginInfo = true).prop("state")).isEqualTo("SUCCESS")
+        val charged = stack.payment(tenant, paymentId, withPluginInfo = true)
+        assertThat(charged.prop("state")).isEqualTo("SUCCESS")
 
-        stack.followUp(tenant, paymentId, "REFUND", "30.00")
+        // The refund stays processing at monobank until the test settles it: each entry reads its own state.
+        fake.setRefundSettlement(RefundSettlement.MANUAL)
+        try {
+            stack.followUp(tenant, paymentId, "REFUND", "30.00")
+            val refunding = stack.payment(tenant, paymentId, withPluginInfo = true)
+            assertThat(refunding.states()).containsExactly("PURCHASE=SUCCESS", "REFUND=PENDING")
+            fake.settleRefund(charged.prop("invoiceId")!!, refunding.prop("reference", 1), true)
+        } finally {
+            fake.setRefundSettlement(RefundSettlement.AUTOMATIC)
+        }
         stack.awaitPayment(tenant, paymentId) {
             it.lastTx().path("status").asText() == "SUCCESS" &&
                 it.path("refundedAmount").decimalValue().signum() > 0
         }
+        assertThat(stack.payment(tenant, paymentId, withPluginInfo = true).states())
+            .containsExactly("PURCHASE=SUCCESS", "REFUND=SUCCESS")
         val tooMuch = stack.followUp(tenant, paymentId, "REFUND", "80.00")
         assertThat(tooMuch.status).isNotEqualTo(201)
         val refused = stack.payment(tenant, paymentId).lastTx()
@@ -477,6 +505,8 @@ class PaymentFlowIT {
         stack.followUp(tenant, authId, "CAPTURE", "250.00")
         val captured = stack.awaitPayment(tenant, authId) { it.path("capturedAmount").decimalValue().signum() > 0 }
         assertThat(captured.path("capturedAmount").decimalValue()).isEqualByComparingTo("250")
+        assertThat(stack.payment(tenant, authId, withPluginInfo = true).states())
+            .containsExactly("AUTHORIZE=SUCCESS", "CAPTURE=SUCCESS")
 
         val second = stack.pay(tenant, account, pm, "AUTHORIZE", "100.00", properties = mapOf("hosted" to "true"))
         val secondId = second.path("paymentId").asText()
@@ -489,6 +519,8 @@ class PaymentFlowIT {
                     it.lastTx().path("status").asText() == "SUCCESS"
             }
         assertThat(voided.path("authAmount").decimalValue()).isEqualByComparingTo("0")
+        assertThat(stack.payment(tenant, secondId, withPluginInfo = true).states())
+            .containsExactly("AUTHORIZE=SUCCESS", "VOID=SUCCESS")
         assertThat(
             fake.invoice(stack.payment(tenant, secondId, withPluginInfo = true).prop("invoiceId")!!)!!.status,
         ).isEqualTo("reversed")
