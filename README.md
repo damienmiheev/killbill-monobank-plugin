@@ -6,7 +6,7 @@
 
 A [Kill Bill](https://killbill.io) payment plugin for [monobank](https://monobank.ua) internet acquiring (Ukraine).
 
-> **Status: 0.1.3.** Every operation below is tested against a real Kill Bill with the SDK's fake
+> **Status: 0.1.4.** Every operation below is tested against a real Kill Bill with the SDK's fake
 > monobank, and live against monobank's test merchant.
 
 It maps Kill Bill's payment API onto monobank with **one Kill Bill transaction per real monobank operation**:
@@ -50,8 +50,8 @@ A monobank acquiring merchant token. Card saving (tokenisation) must be switched
 1. Apply the schema to Kill Bill's database: [`src/main/resources/ddl-postgresql.sql`](src/main/resources/ddl-postgresql.sql)
    (later versions add `migration/V…sql` files). The plugin never creates tables and refuses to start without them.
 2. Install the bundle from Maven Central
-   (`io.github.damienmiheev:killbill-monobank-plugin:0.1.3`):
-   `kpm install_java_plugin killbill-monobank --group-id=io.github.damienmiheev --artifact-id=killbill-monobank-plugin --version=0.1.3`,
+   (`io.github.damienmiheev:killbill-monobank-plugin:0.1.4`):
+   `kpm install_java_plugin killbill-monobank --group-id=io.github.damienmiheev --artifact-id=killbill-monobank-plugin --version=0.1.4`,
    or put the jar at `/var/lib/killbill/bundles/plugins/java/killbill-monobank/<version>/killbill-monobank-<version>.jar`.
    Bake it into your Kill Bill image (owned by Kill Bill's user): Kill Bill recreates its plugins directory on
    first boot, so a file copied into a container before its first start is lost.
@@ -126,7 +126,9 @@ differ from Kill Bill's transaction status after an operator fixes that status b
 SUCCESS still says `FAILED` (the plugin refuses to refund it, since nothing was charged), and a REVIEW one keeps saying
 `REVIEW` until the reconcile job closes the row in Kill Bill's state. A transaction refused before the plugin stored it
 (for example `CURRENCY_NOT_SUPPORTED`, `NO_ACTIVE_CARD`, `PREVIOUS_CHARGE_UNRESOLVED`) has no plugin info, so no
-`state`: nothing reached monobank for it. The rule for a caller that offers refunds: a payment is refundable only when its PURCHASE (or, for a hold, its CAPTURE) carries `state` = `SUCCESS`; a missing `state` or any other value is not refundable.
+`state`: nothing reached monobank for it. The rule for a caller that offers refunds: a payment is refundable only when
+its PURCHASE (or, for a hold, its CAPTURE) carries `state` = `SUCCESS`; a missing `state` or any other value is not
+refundable.
 
 Routes under `/plugins/killbill-monobank/`:
 

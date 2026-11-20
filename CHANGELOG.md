@@ -5,6 +5,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-11-21
+
 ### Added
 
 - The property `state`: the plugin's own state (`SENDING`, `PENDING`, `UNKNOWN`, `REVIEW`, `SUCCESS`, `FAILED`,
@@ -12,7 +14,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
   plugin info), in plugin info (`GET /1.0/kb/payments/{id}?withPluginInfo=true`) and in the answers to payment calls.
   It can differ from Kill Bill's status after a hand fix. The plugin already refused to refund a FAILED purchase that
   was fixed to SUCCESS in Kill Bill; `state` (still `FAILED`) now makes that visible to the caller. A REVIEW row fixed
-  in Kill Bill reads `REVIEW` until the reconcile job closes it. The rule: a payment is refundable only when its PURCHASE (or, for a hold, its CAPTURE) carries `state` = `SUCCESS`; a missing `state` or any other value is not refundable.
+  in Kill Bill reads `REVIEW` until the reconcile job closes it. The rule: a payment is refundable only when its
+  PURCHASE (or, for a hold, its CAPTURE) carries `state` = `SUCCESS`; a missing `state` or any other value is not
+  refundable.
 
 ## [0.1.3] - 2026-11-20
 
@@ -54,5 +58,7 @@ failed at signing and at the Central Portal's validation.)
   the payment control plugins so invoices are paid, the cancel and public-key routes, and a reconcile job.
 - Encrypted card tokens bound to their payment method, removal at monobank on delete.
 
-[Unreleased]: https://github.com/damienmiheev/killbill-monobank-plugin/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/damienmiheev/killbill-monobank-plugin/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/damienmiheev/killbill-monobank-plugin/releases/tag/v0.1.4
+[0.1.3]: https://github.com/damienmiheev/killbill-monobank-plugin/releases/tag/v0.1.3
 [0.1.2]: https://github.com/damienmiheev/killbill-monobank-plugin/releases/tag/v0.1.2
