@@ -10,7 +10,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - `GET /plugins/killbill-monobank/pubkey?refresh=true`: re-reads monobank's webhook key before answering (at most
   once a minute per merchant token, every 10 s while reads fail) and answers 503 when it can't be re-read now. A
   forwarder that checks `X-Sign` itself calls it after a failed check, so a key rotation is picked up without a
-  webhook reaching the plugin or a restart; a webhook that still fails then gets 5xx, not dropped (design A7).
+  webhook reaching the plugin or a restart. A forwarder should answer monobank 5xx, never drop, a webhook that
+  still fails after a refresh (design A7).
 
 ### Changed
 

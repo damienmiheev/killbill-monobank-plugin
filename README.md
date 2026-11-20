@@ -128,7 +128,7 @@ Routes under `/plugins/killbill-monobank/`:
 |---|---|---|
 | `POST /notification` | monobank's signature (and `X-Notification-Secret` if configured) | monobank's webhook. |
 | `POST /payments/{paymentId}/cancel` | Kill Bill credentials with `payment:transition` | Gives up an unpaid hosted page: 200 when cancelled, 409 when the customer paid or is paying, 503 when monobank has not settled the page yet (ask again), 404 for a payment of another tenant. |
-| `GET /pubkey` | Kill Bill credentials | monobank's current webhook public key, for a forwarder that verifies before forwarding. `?refresh=true` re-reads it from monobank first (at most once a minute per merchant token, every 10 s while reads fail); call it when a signature fails, since monobank may have rotated the key; 503 when it can't be re-read now. A webhook that still fails after a refresh gets 5xx, never dropped (design A7). |
+| `GET /pubkey` | Kill Bill credentials | monobank's current webhook public key, for a forwarder that verifies before forwarding. `?refresh=true` re-reads it from monobank first (at most once a minute per merchant token, every 10 s while reads fail); call it when a signature fails, since monobank may have rotated the key; 503 when it can't be re-read now. A forwarder should answer monobank 5xx, never drop, a webhook that still fails after a refresh (design A7). |
 | `GET /healthcheck` | none | Database, schema, reconcile job; with Kill Bill credentials also the counters, with tenant headers the tenant's settings. |
 
 ## Health
