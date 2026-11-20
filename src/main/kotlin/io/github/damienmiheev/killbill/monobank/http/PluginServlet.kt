@@ -110,7 +110,12 @@ class PluginServlet(
         }
     }
 
-    /** monobank's current public webhook key for the caller's tenant, so a forwarder can verify without the token. */
+    /**
+     * monobank's current public webhook key for the caller's tenant, so a forwarder can verify without the token.
+     * With `refresh=true` (after a forwarder's check failed: monobank may have rotated the key) the key is re-read from
+     * monobank first, within the SDK's limits per merchant token (once a minute after a successful read, every 10 s
+     * while reads fail); 503 when it can't be re-read now; 400 for any other `refresh` value.
+     */
     private fun publicKey(
         req: HttpServletRequest,
         resp: HttpServletResponse,
@@ -123,13 +128,21 @@ class PluginServlet(
                     HttpServletResponse.SC_SERVICE_UNAVAILABLE,
                     mapOf("error" to "tenant settings are not valid"),
                 )
+        val refresh = req.getParameter("refresh")
+        if (refresh != null && refresh != "true") {
+            return json(resp, HttpServletResponse.SC_BAD_REQUEST, mapOf("error" to "refresh must be true or absent"))
+        }
+        val webhooks = clients.forToken(settings.merchantToken).webhooks
         val key =
-            clients.forToken(settings.merchantToken).webhooks.currentPublicKey()
-                ?: return json(
-                    resp,
-                    HttpServletResponse.SC_SERVICE_UNAVAILABLE,
-                    mapOf("error" to "monobank's key is unavailable"),
-                )
+            if (refresh == "true") {
+                webhooks.refreshPublicKey().takeUnless { it.isUnavailable }?.key
+            } else {
+                webhooks.currentPublicKey()
+            } ?: return json(
+                resp,
+                HttpServletResponse.SC_SERVICE_UNAVAILABLE,
+                mapOf("error" to "monobank's key is unavailable"),
+            )
         json(resp, HttpServletResponse.SC_OK, mapOf("key" to key))
     }
 

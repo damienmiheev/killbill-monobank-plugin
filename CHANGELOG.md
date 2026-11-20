@@ -5,6 +5,18 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `GET /plugins/killbill-monobank/pubkey?refresh=true`: re-reads monobank's webhook key before answering (at most
+  once a minute per merchant token, every 10 s while reads fail) and answers 503 when it can't be re-read now. A
+  forwarder that checks `X-Sign` itself calls it after a failed check, so a key rotation is picked up without a
+  webhook reaching the plugin or a restart; a webhook that still fails then gets 5xx, not dropped (design A7).
+
+### Changed
+
+- Built on the monobank SDK 1.1.0 (`WebhookVerifier.refreshPublicKey()`; also fixes a webhook verification answering
+  "invalid signature" instead of "key unavailable" in a race during the key fetch back-off).
+
 ## [0.1.2] - 2026-11-13
 
 The first published release, for Kill Bill 0.24. (0.1.0 and 0.1.1 were tagged but never published: their uploads
