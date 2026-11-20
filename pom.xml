@@ -180,7 +180,7 @@
             <!-- Live tests only: pays monobank's test payment pages with a test card. -->
             <groupId>com.microsoft.playwright</groupId>
             <artifactId>playwright</artifactId>
-            <version>1.64.0</version>
+            <version>1.65.0</version>
             <scope>test</scope>
         </dependency>
         <dependency>
@@ -468,7 +468,7 @@
                         -->
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-gpg-plugin</artifactId>
-                        <version>3.2.7</version>
+                        <version>3.2.8</version>
                         <configuration>
                             <signer>bc</signer>
                         </configuration>
