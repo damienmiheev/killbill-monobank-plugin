@@ -12,7 +12,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Tenant setting `basketFromInvoice=true`: a payment of a Kill Bill invoice without the caller's `basketOrder` (auto-pay,
   Kill Bill's retries, `POST /invoices/{id}/payments`) carries one receipt item named after what the invoice charges
   (the plan's catalogue `prettyName`, else its name; an external charge's description), quantity 1, priced at the
-  amount, with the tenant's item code and split receiver; it is also the page text unless `destination` is passed.
+  amount, with the tenant's item code and split receiver. Its name is also the page text, ahead of the tenant's
+  `destination` setting; a `destination` property on the payment still comes first.
   When the invoice can't be read or used (another account's, another currency, no charge line), the default item is
   sent, a warning is logged and the health counter `basketFallback` grows. Off by default.
 - A part capture or refund of a charge with the invoice's item needs no `basketOrder`: the plugin sends that item with
