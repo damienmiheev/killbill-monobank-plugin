@@ -13,15 +13,15 @@ and the project uses [Semantic Versioning](https://semver.org/).
   amount, with the tenant's item code and split receiver; it is also the page text unless `destination` is passed.
   When the invoice can't be read or used (another account's, another currency, no charge line), the default item is
   sent, a warning is logged and the health counter `basketFallback` grows. Off by default.
-- The property `amountStep` on a hold, purchase or capture with a one-item basket (minor units).
+- A part capture or refund of a charge with the invoice's item needs no `basketOrder`: the plugin sends that item with
+  quantity = amount ÷ its price (at most 3 decimals; other amounts are refused before monobank is called,
+  `INVALID_BASKET`). Charges with the default item or the caller's items work as before.
+- The property `amountStep` (minor units) on a hold, purchase or capture with the default item (1) or the invoice's
+  item: a part capture or refund must be a multiple of it. For every tenant with baskets.
 
 ### Changed
 
-- A part capture or refund of a charge with one item of its own (an invoice item or a caller's single item) no longer
-  needs the caller's `basketOrder`: the plugin sends that item with quantity = amount ÷ its price (at most 3 decimals;
-  other amounts are refused before monobank is called, `INVALID_BASKET`). The default item and several-item baskets
-  work as before.
-- Item names are cut to 128 code points everywhere (was UTF-16 characters).
+- Item names are cut so that a surrogate pair is never split (still at most 128 UTF-16 characters).
 
 ## [0.1.4] - 2026-11-21
 

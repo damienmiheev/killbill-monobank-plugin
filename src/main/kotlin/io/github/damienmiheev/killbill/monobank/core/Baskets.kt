@@ -8,12 +8,9 @@ import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.github.damienmiheev.killbill.monobank.config.TenantSettings
-import io.github.damienmiheev.killbill.monobank.money.Money
 import io.github.damienmiheev.monobank.acquiring.common.BasketItem
 import io.github.damienmiheev.monobank.acquiring.common.FiscalizationItem
-import org.killbill.billing.invoice.api.InvoiceItemType
 import java.math.BigDecimal
-import java.math.RoundingMode
 
 /**
  * `merchantPaymInfo.basketOrder`: what monobank prints on its fiscal receipt and how split payments are divided.
@@ -39,7 +36,7 @@ object Baskets {
         val code = settings.basketItemCode ?: return null
         return listOf(
             BasketItem
-                .builder(cutName(name), quantityOf(amountMinor), UNIT_MINOR, code)
+                .builder(ItemNames.cut(name), Quantities.ofUnits(amountMinor), Quantities.UNIT_MINOR, code)
                 .total(amountMinor)
                 .splitReceiverId(settings.splitReceiverId)
                 .build(),
@@ -47,85 +44,17 @@ object Baskets {
     }
 
     /**
-     * The one item of a charge that pays [invoice] (design A5, "Receipt items from the invoice"): named after what the
-     * invoice charges, quantity 1, priced at the charge's amount, with the tenant's code and split receiver. A
-     * [InvoiceBasket.Fallback] says why it can't be built (the caller then sends the default item).
-     */
-    fun fromInvoice(
-        invoice: InvoiceView,
-        settings: TenantSettings,
-        accountId: java.util.UUID,
-        money: Money,
-    ): InvoiceBasket {
-        val code = settings.basketItemCode ?: return InvoiceBasket.Fallback("the tenant sends no basket")
-        if (invoice.accountId != accountId) return InvoiceBasket.Fallback("the invoice belongs to another account")
-        if (invoice.currency != money.currency.currencyCode) {
-            return InvoiceBasket.Fallback("the invoice's currency is ${invoice.currency}")
-        }
-        if (money.minor <= 0) return InvoiceBasket.Fallback("nothing to charge")
-        val onInvoice = invoice.items.map { it.id }.toSet()
-        // adjustments on this invoice of its own items; one linked to another invoice's item names nothing
-        val adjusted =
-            invoice.items
-                .filter { it.type in ADJUSTMENTS && it.linkedItemId != null && it.linkedItemId in onInvoice }
-                .groupBy({ it.linkedItemId!! }, { it.amount })
-                .mapValues { (_, amounts) -> amounts.fold(BigDecimal.ZERO, BigDecimal::add) }
-        val lines =
-            invoice.items.filter { line ->
-                line.type in CHARGES && (line.amount + (adjusted[line.id] ?: BigDecimal.ZERO)).signum() > 0
-            }
-        if (lines.isEmpty()) return InvoiceBasket.Fallback("the invoice has no charge line")
-        val names = lines.mapNotNull { clean(nameOf(it)) }.distinct()
-        if (names.isEmpty()) return InvoiceBasket.Fallback("the invoice's charge lines have no name")
-        return InvoiceBasket.Built(
-            BasketItem
-                .builder(cutName(names.joinToString("; ")), BigDecimal.ONE, money.minor, code)
-                .total(money.minor)
-                .splitReceiverId(settings.splitReceiverId)
-                .build(),
-        )
-    }
-
-    private fun nameOf(line: InvoiceView.Line): String? =
-        if (line.type == InvoiceItemType.EXTERNAL_CHARGE) {
-            line.description?.takeIf { it.isNotBlank() } ?: line.prettyProductName ?: line.productName
-        } else {
-            line.prettyPlanName?.takeIf { it.isNotBlank() } ?: line.planName
-        }
-
-    /** Control characters and line breaks become spaces, runs of spaces one, the ends trimmed; null when empty. */
-    private fun clean(name: String?): String? =
-        name
-            ?.replace(CONTROL, " ")
-            ?.replace(SPACES, " ")
-            ?.trim()
-            ?.takeIf { it.isNotEmpty() }
-
-    /** A name cut to monobank's 128 characters, by code points: the one rule for every name the plugin cuts. */
-    fun cutName(name: String): String =
-        if (name.codePointCount(0, name.length) <= MAX_NAME) {
-            name
-        } else {
-            name.substring(0, name.offsetByCodePoints(0, MAX_NAME))
-        }
-
-    /**
      * The amount step of a charge stored with [json] (minor units): a part capture or refund of it is a multiple of
-     * this. Only for a one-item basket (`sum ÷ gcd(sum, 1000)`, 1 for the default item); null otherwise.
+     * this. 1 for the default item, `sum ÷ gcd(sum, 1000)` for an invoice's item; null for the caller's items.
      */
-    fun amountStep(json: String?): Long? =
-        runCatching { stored(json) }
-            .getOrNull()
-            ?.items
-            ?.singleOrNull()
-            ?.let { step(it.sum) }
-
-    private fun step(sum: Long): Long = sum / gcd(sum, QTY_SCALE)
-
-    private tailrec fun gcd(
-        a: Long,
-        b: Long,
-    ): Long = if (b == 0L) a else gcd(b, a % b)
+    fun amountStep(json: String?): Long? {
+        val stored = runCatching { stored(json) }.getOrNull() ?: return null
+        return when (stored.kind) {
+            Kind.DEFAULT -> 1
+            Kind.INVOICE -> stored.items.singleOrNull()?.let { Quantities.step(it.sum) }
+            Kind.CALLER -> null
+        }
+    }
 
     /**
      * Parses the caller's basket: a JSON array of `{name, qty, sum, code}` with optional `splitReceiverId`, `unit`,
@@ -147,17 +76,18 @@ object Baskets {
     }
 
     /**
-     * The basket as stored on a row, to rebuild the items of later captures and refunds: the items, and whether they
-     * are the plugin's default one-unit item ([single]) or the caller's own.
+     * The basket as stored on a row, to rebuild the items of later captures and refunds: the items and their [Kind]
+     * (`default` and, from 0.1.5, `invoice` flags; a row of 0.1.4 has only `default`).
      */
     fun toJson(
         items: List<BasketItem>?,
-        isDefault: Boolean,
+        kind: Kind,
     ): String? =
         items?.let { list ->
             JSON.writeValueAsString(
                 mapOf(
-                    "default" to isDefault,
+                    "default" to (kind == Kind.DEFAULT),
+                    "invoice" to (kind == Kind.INVOICE),
                     "items" to
                         list.map { item ->
                             linkedMapOf<String, Any?>(
@@ -175,22 +105,26 @@ object Baskets {
             )
         }
 
-    /** A capture's or refund's items with the charge's own default/caller marker, for storing on its row. */
+    /** Who made a charge's basket: the plugin's one-unit item, the invoice's item, or the caller. */
+    enum class Kind { DEFAULT, INVOICE, CALLER }
+
+    /** A capture's or refund's items with the charge's own [Kind], for storing on its row. */
     fun storedFor(
         items: List<BasketItem>?,
         chargeBasket: String?,
-    ): String? = toJson(items, isDefault = chargeBasket?.let { JSON.readTree(it).path("default").asBoolean() } == true)
+    ): String? = toJson(items, runCatching { stored(chargeBasket)?.kind }.getOrNull() ?: Kind.CALLER)
 
     /**
      * The receipt items of a capture or refund of [amountMinor] (`invoice/finalize`, `invoice/cancel`), built from
      * the basket of the charge it acts on ([chargeBasket], null when the charge sent none). monobank accepts only
      * the charge's own items (same name, code, unit price and split receiver) with quantities no larger:
      * - the caller's `basketOrder` for this operation, when given: checked item by item against the charge's;
-     * - else, for a charge with one item, that item with quantity = amount ÷ its price (at most 3 decimals, no more
-     *   than the item had: the amount is a multiple of [amountStep]);
-     * - else the charge's own items, unchanged, when the operation is for their whole total.
-     * A partial operation on a charge with several items of the caller's needs the caller's `basketOrder`: only the
-     * caller knows which quantities to give back. Throws [IllegalArgumentException] with the reason otherwise.
+     * - else, for the default item, that item with the amount as its quantity (22.90 × 1.00);
+     * - else, for an invoice's item, that item unchanged for its whole amount, or with quantity = amount ÷ its price
+     *   (at most 3 decimals, no more than the item had: the amount is a multiple of [amountStep]);
+     * - else the caller's items, unchanged, when the operation is for their whole total.
+     * A partial operation on a charge with the caller's own items needs the caller's `basketOrder`: only the caller
+     * knows which quantities to give back. Throws [IllegalArgumentException] with the reason otherwise.
      */
     fun forOperation(
         json: String?,
@@ -211,19 +145,33 @@ object Baskets {
             return given
         }
         if (stored == null) return null
-        // the default item exactly as before (22.90 × 1.00: two decimals, as seen live); any other single item by
-        // its price
-        if (stored.isDefault) return listOf(copy(stored.items.single(), quantityOf(amountMinor)))
-        stored.items.singleOrNull()?.let { item -> return listOf(copy(item, quantityFor(item, amountMinor))) }
-        return when {
+        val whole =
             stored.items
                 .fold(BigDecimal.ZERO) { acc, item -> acc + item.qty * BigDecimal.valueOf(item.sum) }
-                .compareTo(BigDecimal.valueOf(amountMinor)) == 0 -> stored.items
+                .compareTo(BigDecimal.valueOf(amountMinor)) == 0
+        return when {
+            stored.kind == Kind.DEFAULT -> {
+                listOf(copy(stored.items.single(), Quantities.ofUnits(amountMinor)))
+            }
 
-            else -> throw IllegalArgumentException(
-                "a partial capture or refund of a payment with its own basketOrder needs a basketOrder of " +
-                    "the same items with smaller quantities (monobank changes only quantities)",
-            )
+            whole -> {
+                stored.items
+            }
+
+            stored.kind == Kind.INVOICE -> {
+                stored.items.single().let {
+                    listOf(
+                        copy(it, Quantities.of(it, amountMinor)),
+                    )
+                }
+            }
+
+            else -> {
+                throw IllegalArgumentException(
+                    "a partial capture or refund of a payment with its own basketOrder needs a basketOrder of " +
+                        "the same items with smaller quantities (monobank changes only quantities)",
+                )
+            }
         }
     }
 
@@ -239,7 +187,7 @@ object Baskets {
         }
 
     private class Stored(
-        val isDefault: Boolean,
+        val kind: Kind,
         val items: List<BasketItem>,
     )
 
@@ -251,12 +199,18 @@ object Baskets {
             } catch (e: com.fasterxml.jackson.core.JacksonException) {
                 throw IllegalArgumentException("the payment's stored receipt cannot be read", e)
             }
-        return Stored(node.path("default").asBoolean(), node.path("items").map(::item))
+        val kind =
+            when {
+                node.path("default").asBoolean() -> Kind.DEFAULT
+                node.path("invoice").asBoolean() -> Kind.INVOICE
+                else -> Kind.CALLER
+            }
+        return Stored(kind, node.path("items").map(::item))
     }
 
     /** What monobank matches a capture's or refund's item on. */
     private fun key(item: BasketItem): List<Any?> =
-        listOf(cutName(item.name), item.code, item.sum, item.splitReceiverId)
+        listOf(ItemNames.cut(item.name), item.code, item.sum, item.splitReceiverId)
 
     private fun copy(
         item: BasketItem,
@@ -271,30 +225,6 @@ object Baskets {
             .unit(item.unit)
             .build()
 
-    /** The quantity of [item] that makes [amountMinor]: exact, at most 3 decimals, no more than the item had. */
-    private fun quantityFor(
-        item: BasketItem,
-        amountMinor: Long,
-    ): BigDecimal {
-        val qty =
-            try {
-                BigDecimal
-                    .valueOf(amountMinor)
-                    .divide(BigDecimal.valueOf(item.sum), QTY_DECIMALS, RoundingMode.UNNECESSARY)
-                    .stripTrailingZeros()
-            } catch (_: ArithmeticException) {
-                throw IllegalArgumentException(
-                    "the amount $amountMinor is not a multiple of this payment's amount step ${step(item.sum)} " +
-                        "(its receipt item is priced ${item.sum}; monobank changes only the item's quantity)",
-                )
-            }
-        require(qty <= item.qty) { "the amount $amountMinor is more than the payment had (${item.qty} × ${item.sum})" }
-        return qty
-    }
-
-    /** The quantity of one-unit items that makes [amountMinor] (2290 → 22.90). */
-    private fun quantityOf(amountMinor: Long): BigDecimal = BigDecimal.valueOf(amountMinor, UNIT_SCALE)
-
     private fun item(node: JsonNode): BasketItem {
         val name = node.path("name").asText("")
         val code = node.path("code").asText("")
@@ -303,32 +233,11 @@ object Baskets {
         require(name.isNotBlank() && code.isNotBlank() && sum > 0 && qty.signum() > 0) {
             "each basketOrder item needs name, code, sum > 0 and qty > 0"
         }
-        val builder = BasketItem.builder(cutName(name), qty, sum, code)
+        val builder = BasketItem.builder(ItemNames.cut(name), qty, sum, code)
         node.path("splitReceiverId").takeIf { it.isTextual }?.let { builder.splitReceiverId(it.asText()) }
         node.path("unit").takeIf { it.isTextual }?.let { builder.unit(it.asText()) }
         node.path("uktzed").takeIf { it.isTextual }?.let { builder.uktzed(it.asText()) }
         node.path("tax").takeIf { it.isArray }?.let { taxes -> builder.tax(taxes.map { it.asInt() }) }
         return builder.build()
     }
-
-    private const val MAX_NAME = 128
-
-    // A capture's or refund's quantity has at most 3 decimals (more is untested live).
-    private const val QTY_DECIMALS = 3
-    private const val QTY_SCALE = 1000L
-
-    private val CHARGES =
-        setOf(
-            InvoiceItemType.RECURRING,
-            InvoiceItemType.FIXED,
-            InvoiceItemType.USAGE,
-            InvoiceItemType.EXTERNAL_CHARGE,
-        )
-    private val ADJUSTMENTS = setOf(InvoiceItemType.ITEM_ADJ, InvoiceItemType.REPAIR_ADJ)
-    private val CONTROL = Regex("[\\p{Cntrl}\\p{Zl}\\p{Zp}]")
-    private val SPACES = Regex("\\s+")
-
-    // UAH (the only currency the plugin takes) has two decimals: one unit is 100 minor units.
-    private const val UNIT_SCALE = 2
-    private const val UNIT_MINOR = 100L
 }

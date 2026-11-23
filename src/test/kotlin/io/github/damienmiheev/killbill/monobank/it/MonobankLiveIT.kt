@@ -388,7 +388,9 @@ class MonobankLiveIT {
         awaitPaid(saving, "the saving page")
         assertThat(awaitCardSettled(pm)).isEqualTo("ACTIVE")
 
-        val json = com.fasterxml.jackson.databind.ObjectMapper()
+        val json =
+            com.fasterxml.jackson.databind
+                .ObjectMapper()
         val charge =
             json.writeValueAsString(
                 listOf(
@@ -400,19 +402,40 @@ class MonobankLiveIT {
                     ),
                 ),
             )
-        val created = stack.post("/1.0/kb/invoices/charges/$account?autoCommit=true", charge, "application/json", tenant)
+        val created =
+            stack.post("/1.0/kb/invoices/charges/$account?autoCommit=true", charge, "application/json", tenant)
         assertThat(created.status).describedAs(created.body).isIn(200, 201)
-        val kbInvoice = created.json().path(0).path("invoiceId").asText()
-        val body = json.writeValueAsString(mapOf("accountId" to account, "purchasedAmount" to "10.00", "paymentMethodId" to pm))
+        val kbInvoice =
+            created
+                .json()
+                .path(0)
+                .path("invoiceId")
+                .asText()
+        val body =
+            json.writeValueAsString(
+                mapOf("accountId" to account, "purchasedAmount" to "10.00", "paymentMethodId" to pm),
+            )
         val paid = stack.post("/1.0/kb/invoices/$kbInvoice/payments", body, "application/json", tenant)
         assertThat(paid.status).describedAs(paid.body).isIn(201, 402)
-        val id = stack.get("/1.0/kb/invoices/$kbInvoice/payments", tenant).json().path(0).path("paymentId").asText()
+        val id =
+            stack
+                .get("/1.0/kb/invoices/$kbInvoice/payments", tenant)
+                .json()
+                .path(0)
+                .path("paymentId")
+                .asText()
         assertThat(completeSavedCard(stack.payment(tenant, id), "invoice charge 10.00")).isEqualTo("SUCCESS")
         assertThat(stack.payment(tenant, id, withPluginInfo = true).prop("amountStep")).isEqualTo("1")
         for ((part, total) in listOf("0.01" to "0.01", "2.50" to "2.51", "7.49" to "10.00")) {
             stack.followUp(tenant, id, "REFUND", part)
             assertThat(awaitAmount(id, "refundedAmount", total)).isEqualByComparingTo(total)
-            report("invoice item refund $part", stack.payment(tenant, id, withPluginInfo = true).lastTx().path("status").asText())
+            val status =
+                stack
+                    .payment(tenant, id, withPluginInfo = true)
+                    .lastTx()
+                    .path("status")
+                    .asText()
+            report("invoice item refund $part", status)
         }
         val status = mono.invoices.status(stack.payment(tenant, id, withPluginInfo = true).prop("invoiceId")!!)
         report("invoice item at monobank", "status=${status.status} finalAmount=${status.finalAmount}")

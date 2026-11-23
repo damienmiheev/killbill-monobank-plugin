@@ -51,12 +51,12 @@ class InvoiceBasketTest {
     private fun built(
         invoice: InvoiceView,
         amountMinor: Long,
-    ) = (Baskets.fromInvoice(invoice, settings, account, uah(amountMinor)) as InvoiceBasket.Built).item
+    ) = (InvoiceBaskets.build(invoice, settings, account, uah(amountMinor)) as InvoiceBasket.Built).item
 
     private fun fallback(
         invoice: InvoiceView,
         amountMinor: Long,
-    ) = (Baskets.fromInvoice(invoice, settings, account, uah(amountMinor)) as InvoiceBasket.Fallback).reason
+    ) = (InvoiceBaskets.build(invoice, settings, account, uah(amountMinor)) as InvoiceBasket.Fallback).reason
 
     @Test
     fun `a renewal is one item named by the plan's pretty name, 1 x the amount, with the tenant's code`() {
@@ -139,12 +139,20 @@ class InvoiceBasketTest {
     }
 
     @Test
-    fun `long names are cut to 128 code points`() {
-        val long = "😀".repeat(100) + "a".repeat(100)
+    fun `long names are cut to 128 UTF-16 units, never inside a surrogate pair`() {
+        val long = "a" + "😀".repeat(100)
         val name = built(invoice(line(InvoiceItemType.EXTERNAL_CHARGE, "1", description = long)), 100).name
-        assertThat(name.codePointCount(0, name.length)).isEqualTo(128)
-        assertThat(name).startsWith("😀".repeat(100))
-        assertThat(Baskets.cutName(long)).isEqualTo(name)
+        assertThat(name.length).isEqualTo(127)
+        assertThat(name).isEqualTo("a" + "😀".repeat(63))
+        assertThat(ItemNames.cut("b".repeat(200))).hasSize(128)
+        assertThat(ItemNames.cut(long)).isEqualTo(name)
+    }
+
+    @Test
+    fun `bidi overrides and zero-width characters are taken out of a name`() {
+        val spoof = "Seqra\u202E Audit\u200B,\u00AD 1 домен"
+        assertThat(built(invoice(line(InvoiceItemType.EXTERNAL_CHARGE, "1", description = spoof)), 100).name)
+            .isEqualTo("Seqra Audit , 1 домен")
     }
 
     @Test

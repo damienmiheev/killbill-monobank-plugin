@@ -80,6 +80,7 @@ abstract class ServiceHarness {
     /** Kill Bill's invoices, as a test sets them up (the plugin reads them for receipt items). */
     @Volatile
     protected var invoiceReader: (UUID, UUID, UUID) -> InvoiceView = { _, _, id -> error("no invoice $id") }
+    private val invoices = InvoiceReader { tenant, account, id -> invoiceReader(tenant, account, id) }
 
     @BeforeAll
     fun start() {

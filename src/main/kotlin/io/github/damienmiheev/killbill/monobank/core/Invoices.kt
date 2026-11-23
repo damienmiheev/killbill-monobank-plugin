@@ -4,6 +4,8 @@
  */
 package io.github.damienmiheev.killbill.monobank.core
 
+import io.github.damienmiheev.killbill.monobank.config.TenantSettings
+import io.github.damienmiheev.killbill.monobank.money.Money
 import io.github.damienmiheev.monobank.acquiring.common.BasketItem
 import org.joda.time.DateTime
 import org.killbill.billing.invoice.api.InvoiceItemType
@@ -82,4 +84,63 @@ class KillBillInvoiceReader(
                 },
         )
     }
+}
+
+/** The receipt item of a charge that pays a Kill Bill invoice (design A5, "Receipt items from the invoice"). */
+object InvoiceBaskets {
+    /**
+     * The one item of a charge that pays [invoice] (design A5, "Receipt items from the invoice"): named after what the
+     * invoice charges, quantity 1, priced at the charge's amount, with the tenant's code and split receiver. A
+     * [InvoiceBasket.Fallback] says why it can't be built (the caller then sends the default item).
+     */
+    fun build(
+        invoice: InvoiceView,
+        settings: TenantSettings,
+        accountId: java.util.UUID,
+        money: Money,
+    ): InvoiceBasket {
+        val code = settings.basketItemCode ?: return InvoiceBasket.Fallback("the tenant sends no basket")
+        if (invoice.accountId != accountId) return InvoiceBasket.Fallback("the invoice belongs to another account")
+        if (invoice.currency != money.currency.currencyCode) {
+            return InvoiceBasket.Fallback("the invoice's currency is ${invoice.currency}")
+        }
+        if (money.minor <= 0) return InvoiceBasket.Fallback("nothing to charge")
+        val onInvoice = invoice.items.map { it.id }.toSet()
+        // adjustments on this invoice of its own items; one linked to another invoice's item names nothing
+        val adjusted =
+            invoice.items
+                .filter { it.type in ADJUSTMENTS && it.linkedItemId != null && it.linkedItemId in onInvoice }
+                .groupBy({ it.linkedItemId!! }, { it.amount })
+                .mapValues { (_, amounts) -> amounts.fold(BigDecimal.ZERO, BigDecimal::add) }
+        val lines =
+            invoice.items.filter { line ->
+                line.type in CHARGES && (line.amount + (adjusted[line.id] ?: BigDecimal.ZERO)).signum() > 0
+            }
+        if (lines.isEmpty()) return InvoiceBasket.Fallback("the invoice has no charge line")
+        val names = lines.mapNotNull { ItemNames.clean(nameOf(it)) }.distinct()
+        if (names.isEmpty()) return InvoiceBasket.Fallback("the invoice's charge lines have no name")
+        return InvoiceBasket.Built(
+            BasketItem
+                .builder(ItemNames.cut(names.joinToString("; ")), BigDecimal.ONE, money.minor, code)
+                .total(money.minor)
+                .splitReceiverId(settings.splitReceiverId)
+                .build(),
+        )
+    }
+
+    private fun nameOf(line: InvoiceView.Line): String? =
+        if (line.type == InvoiceItemType.EXTERNAL_CHARGE) {
+            line.description?.takeIf { it.isNotBlank() } ?: line.prettyProductName ?: line.productName
+        } else {
+            line.prettyPlanName?.takeIf { it.isNotBlank() } ?: line.planName
+        }
+
+    private val CHARGES =
+        setOf(
+            InvoiceItemType.RECURRING,
+            InvoiceItemType.FIXED,
+            InvoiceItemType.USAGE,
+            InvoiceItemType.EXTERNAL_CHARGE,
+        )
+    private val ADJUSTMENTS = setOf(InvoiceItemType.ITEM_ADJ, InvoiceItemType.REPAIR_ADJ)
 }

@@ -144,8 +144,7 @@ class PaymentService(
         val money: Money,
         val destination: String,
         val basket: List<BasketItem>?,
-        /** The plugin's own one-unit item, not the caller's basketOrder. */
-        val defaultBasket: Boolean,
+        val basketKind: Baskets.Kind,
         val hosted: Boolean,
         val card: PmRow?,
     ) : ChargeCheck {
@@ -163,7 +162,7 @@ class PaymentService(
                 amountMinor = money.minor,
                 currency = money.currency.currencyCode,
                 saveCard = hosted && op.properties.flag(Properties.SAVE_CARD),
-                basket = Baskets.toJson(basket, isDefault = defaultBasket),
+                basket = Baskets.toJson(basket, basketKind),
             )
     }
 
@@ -187,16 +186,6 @@ class PaymentService(
             } catch (e: IllegalArgumentException) {
                 return ChargeRefusal(refused(op, INVALID_BASKET, e.message ?: "invalid basketOrder"))
             }
-        val invoiceItem = if (callerBasketItems == null) invoiceItem(op, settings, money) else null
-        val destination =
-            op.properties.string(Properties.DESTINATION)
-                ?: invoiceItem?.name
-                ?: settings.destination
-                ?: DEFAULT_DESTINATION
-        val basket =
-            callerBasketItems
-                ?: invoiceItem?.let { listOf(it) }
-                ?: Baskets.single(settings, destination, money.minor)
         val validity = op.properties.long(Properties.VALIDITY_SECONDS)
         if (op.properties.string(Properties.VALIDITY_SECONDS) != null &&
             (validity == null || validity !in VALIDITY_RANGE)
@@ -210,15 +199,32 @@ class PaymentService(
                 refused(op, NO_ACTIVE_CARD, "the payment method has no saved card; use hosted=true", decline = true),
             )
         }
-        return ChargePlan(
-            settings,
-            money,
-            destination,
-            basket,
-            callerBasket == null && invoiceItem == null,
-            hosted,
-            card,
-        )
+        // after every refusal: an invoice is read, and a fallback counted, only for a charge that goes ahead
+        return plan(op, settings, money, callerBasketItems, hosted, card)
+    }
+
+    /** The charge's page text and basket: the caller's, the invoice's item, or the default item (design A5). */
+    private fun plan(
+        op: Operation,
+        settings: TenantSettings,
+        money: Money,
+        callerItems: List<BasketItem>?,
+        hosted: Boolean,
+        card: PmRow?,
+    ): ChargePlan {
+        val invoiceItem = if (callerItems == null) invoiceItem(op, settings, money) else null
+        val destination =
+            op.properties.string(Properties.DESTINATION)
+                ?: invoiceItem?.name
+                ?: settings.destination
+                ?: DEFAULT_DESTINATION
+        val (basket, kind) =
+            when {
+                callerItems != null -> callerItems to Baskets.Kind.CALLER
+                invoiceItem != null -> listOf(invoiceItem) to Baskets.Kind.INVOICE
+                else -> Baskets.single(settings, destination, money.minor) to Baskets.Kind.DEFAULT
+            }
+        return ChargePlan(settings, money, destination, basket, kind, hosted, card)
     }
 
     /**
@@ -235,11 +241,14 @@ class PaymentService(
         val invoiceId = op.properties.uuid(Properties.KB_INVOICE_ID) ?: return null
         val built =
             try {
-                Baskets.fromInvoice(invoices.read(op.tenantId, op.accountId, invoiceId), settings, op.accountId, money)
+                InvoiceBaskets.build(invoices.read(op.tenantId, op.accountId, invoiceId), settings, op.accountId, money)
             } catch (
                 @Suppress("TooGenericExceptionCaught") e: Exception,
             ) {
-                InvoiceBasket.Fallback("the invoice can't be read (${e.javaClass.simpleName})")
+                // Kill Bill's InvoiceApiException (no such invoice, …) or anything unexpected: the stack goes to the
+                // log, which holds ids and Kill Bill's message, nothing secret
+                LOG.warn("Payment {} could not read invoice {}", op.paymentId, invoiceId, e)
+                InvoiceBasket.Fallback("the invoice can't be read (${e.javaClass.simpleName}: ${e.message})")
             }
         return when (built) {
             is InvoiceBasket.Built -> {

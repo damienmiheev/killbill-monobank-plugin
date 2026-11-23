@@ -117,13 +117,13 @@ Plugin properties (`pluginProperty=key=value` on Kill Bill's payment calls):
 | `saveCard=true` | With `hosted=true`: save the card on the payment method (the customer must agree). |
 | `redirectUrl`, `destination`, `validitySeconds` | Overrides for one hosted payment. |
 | `callerRef` | Your own id for the payment (e.g. a checkout id); stored and returned as a property. |
-| `basketOrder` | A JSON array of `{name, qty, sum, code}` (plus `splitReceiverId`, `unit`, `tax`, `uktzed`) adding up to the amount. On a capture or refund: the charge's own items with smaller quantities. Without it, a part capture or refund of a one-item charge sends that item with quantity = amount ÷ its price; the amount must be a multiple of the transaction's `amountStep`. |
+| `basketOrder` | A JSON array of `{name, qty, sum, code}` (plus `splitReceiverId`, `unit`, `tax`, `uktzed`) adding up to the amount. On a capture or refund: the charge's own items with smaller quantities. Without it, a part capture or refund of a charge with the invoice's item (`basketFromInvoice`) sends that item with quantity = amount ÷ its price; the amount must be a multiple of the transaction's `amountStep`. |
 | `initiationKind=client` | A saved-card charge made with the customer present (default `merchant`). |
 
 Transactions return `formUrl`, `tdsUrl` (3-D Secure), `invoiceId`, `expiresAt`, `callerRef`, `reference` and `state` as
-plugin properties, and `amountStep` (minor units) on a hold, purchase or capture with a one-item basket: a part capture
-or refund of it must be a multiple of it (1 for the plugin's default item; `price ÷ gcd(price, 1000)` otherwise, since
-monobank changes only an item's quantity and the plugin sends at most 3 decimals). `state` is the plugin's own state of the transaction: `SENDING`, `PENDING`, `UNKNOWN`, `REVIEW`,
+plugin properties, and `amountStep` (minor units) on a hold, purchase or capture with the plugin's own item: a part
+capture or refund of it must be a multiple of it (1 for the default item; `price ÷ gcd(price, 1000)` for an invoice's
+item, since monobank changes only an item's quantity and the plugin sends at most 3 decimals). `state` is the plugin's own state of the transaction: `SENDING`, `PENDING`, `UNKNOWN`, `REVIEW`,
 `SUCCESS`, `FAILED` or `CANCELED` (see the design, A4), in plugin info and in the answers to payment calls. It can
 differ from Kill Bill's transaction status after an operator fixes that status by hand: a FAILED transaction fixed to
 SUCCESS still says `FAILED` (the plugin refuses to refund it, since nothing was charged), and a REVIEW one keeps saying
