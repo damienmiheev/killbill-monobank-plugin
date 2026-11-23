@@ -96,28 +96,8 @@ abstract class ServiceHarness {
         ds.connection.use { c ->
             c.createStatement().use { it.execute(Files.readString(Path.of(System.getProperty("plugin.ddl")))) }
         }
-        fake =
-            FakeMonobankAcquiring
-                .builder()
-                // like monobank's test merchant: receipts and split payments on
-                .fiscalization(true)
-                .splitPayments(true)
-                // a partial capture settles only when a test says so (monobank took more than 30 s live)
-                .finalizeSettlementDelay(null)
-                .build()
-                .start()
-        receiver = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-        receiver.createContext("/hook") { exchange ->
-            val result =
-                handler.handle(
-                    exchange.requestBody.readAllBytes(),
-                    exchange.requestHeaders.getFirst("X-Sign"),
-                    null,
-                )
-            exchange.sendResponseHeaders(result.httpStatus, -1)
-            exchange.close()
-        }
-        receiver.start()
+        fake = newFake()
+        receiver = newReceiver()
 
         val settings = systemSettings()
         val tenants = tenants()
@@ -182,6 +162,33 @@ abstract class ServiceHarness {
                 now,
             )
         }
+    }
+
+    private fun newFake(): FakeMonobankAcquiring =
+        FakeMonobankAcquiring
+            .builder()
+            // like monobank's test merchant: receipts and split payments on
+            .fiscalization(true)
+            .splitPayments(true)
+            // a partial capture settles only when a test says so (monobank took more than 30 s live)
+            .finalizeSettlementDelay(null)
+            .build()
+            .start()
+
+    private fun newReceiver(): HttpServer {
+        val receiver = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        receiver.createContext("/hook") { exchange ->
+            val result =
+                handler.handle(
+                    exchange.requestBody.readAllBytes(),
+                    exchange.requestHeaders.getFirst("X-Sign"),
+                    null,
+                )
+            exchange.sendResponseHeaders(result.httpStatus, -1)
+            exchange.close()
+        }
+        receiver.start()
+        return receiver
     }
 
     protected fun systemSettings(): SystemSettings {
