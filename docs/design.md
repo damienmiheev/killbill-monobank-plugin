@@ -206,8 +206,34 @@ monobank documents **no idempotency key**. Two calls with the same `reference` o
 
 - **CAPTURE** finds the AUTHORIZE row of the same Kill Bill payment. It must be SUCCESS (held), not yet captured and younger than 9 days. The plugin calls `finalize` (amount ≤ hold) and maps the response through A4. The reconcile job alerts on holds older than 8 days.
 - **VOID** of a held, uncaptured AUTHORIZE calls `cancel` without an amount, which releases the hold. Any other VOID is refused (CANCELED, "use refund"), so a void can never refund captured money.
-- **Receipt items.** A tenant with receipts or split payments gets one item per charge priced at one currency unit, with the amount as its quantity (22.90 × 1.00), and the charge's basket is stored on its row. monobank lets a capture or refund change only the quantities of the charge's own items (seen live: `1001` "finalization basket contains item not found in hold", and a partial amount without items is refused too), so CAPTURE and REFUND send that item with the operation's amount as its quantity: every partial amount is exact. A charge with the caller's own `basketOrder` is repeated in full for a full operation; a partial one needs the caller's `basketOrder` of the same items with smaller quantities.
+- **Receipt items.** A tenant with receipts or split payments (`basketItemCode` or `splitReceiverId`) sends a basket with every charge, and the charge's basket is stored on its row (the `basket` column, JSON with its kind). monobank lets a capture or refund change only the quantities of the charge's own items (seen live: `1001` "finalization basket contains item not found in hold", and a partial amount without items is refused too). A charge's basket is, in this order:
+  1. **The caller's** `basketOrder`. A full capture or refund repeats it; a partial one needs the caller's `basketOrder` of the same items with smaller quantities.
+  2. **The invoice's** (tenant setting `basketFromInvoice=true`; see "Receipt items from the invoice" below): one item named after what the invoice charges, quantity 1, priced at the amount.
+  3. **The default:** one item named after `destination`, priced at one currency unit with the amount as its quantity (22.90 × 1.00), so every partial capture or refund is exact.
 - **REFUND** calls `cancel` with `amount` (partial or full) and `extRef` = the refund row's `reference`. The response (`processing`, `success`, `failure`) maps through A4. A pending refund is settled from the `cancelList` entry carrying our `extRef`.
+
+### Receipt items from the invoice
+
+For a merchant with fiscal receipts, a charge that Kill Bill starts by itself (auto-pay, a retry) has no caller to pass `basketOrder`, and the default item ("Payment, 2290 × 1.00") reads badly on a receipt. With the tenant setting `basketFromInvoice=true` the plugin builds the item from the Kill Bill invoice the payment pays.
+
+**When.** All of: the tenant sends baskets (`basketItemCode` or `splitReceiverId`), `basketFromInvoice=true`, the caller passed no `basketOrder`, and the payment carries Kill Bill's `IPCD_INVOICE_ID` (a payment made through `POST /invoices/{id}/payments` or by auto-pay). The setting is off by default, so upgrading changes nothing until a tenant turns it on. It applies to PURCHASE and AUTHORIZE, hosted pages and saved cards alike.
+
+**The item.** One item, quantity 1, sum = the amount of this charge (Kill Bill's payment amount, which is the invoice's balance or the part the caller pays), the tenant's `basketItemCode` and `splitReceiverId`, no tax and no UKTZED (as the default item). Its name:
+- the invoice's **charge lines** are its RECURRING, FIXED, USAGE and EXTERNAL_CHARGE items whose amount, net of the ITEM_ADJ and REPAIR_ADJ items linked to them, is above zero;
+- a subscription line (RECURRING, FIXED, USAGE) is named by the catalogue's pretty plan name (`prettyName` on the plan; Kill Bill gives the plan's name when none is set); an EXTERNAL_CHARGE line by its description, else its pretty product name;
+- the distinct names in the invoice's item order, joined with "; ", cut to 128 characters (monobank's limit).
+
+Credit used by the invoice (CBA_ADJ), an earlier part payment, or a part payment by the caller lower the amount, not the number of lines: the item is always "what the invoice charges, 1 × the amount paid now". One line keeps every refund rule below simple and matches how a single product is sold.
+
+**Page text.** Without a `destination` property, a hosted page shows the item's name (before the tenant's `destination`).
+
+**When it can't be built, the default item is used** and the charge goes ahead: an unreadable invoice (any error from Kill Bill's invoice API), an invoice in another currency than the payment, no charge line, an empty name, or an amount that isn't whole currency units (2290.50: its refund step, below, would be 45.81 ₴ or worse). The plugin logs a warning with the payment and invoice ids and the reason, and counts `basketFallback` (A11). A refusal would cost a Kill Bill retry, and the default item is always a valid receipt.
+
+**Reading the invoice.** `InvoiceUserApi.getInvoice` with the payment's tenant context: a read, so the plugin's Kill Bill user needs no new permission. Kill Bill calls the plugin while it processes the payment; the integration tests prove the read there, for an auto-pay charge and for a hosted invoice payment.
+
+**Captures and refunds of an invoice item.** monobank keeps the item's name, code, sum and split receiver and lets only the quantity shrink, so the plugin sends the item with quantity = amount ÷ sum. A quantity has at most 3 decimals (more is untested live), so an amount fits when `amount × 1000` is a multiple of the sum: the payment's **refund step** is `sum ÷ gcd(sum, 1000)` minor units (2290.00 ₴ → 2.29 ₴; 100.00 ₴ → 0.10 ₴). A full amount always fits. An amount that doesn't fit, or a quantity above what the row still holds, is refused before monobank is called (`INVALID_BASKET`, PLUGIN_FAILURE) with the step in the message; the caller's own `basketOrder` (the same item, a smaller quantity) is still accepted and checked as for any basket. A refund after a partial capture works on the capture's item (its quantity below 1).
+
+**Plugin info.** A PURCHASE or CAPTURE row whose basket is the plugin's own carries `refundStep` (minor units): 1 for the default item, the step above for an invoice item. A caller rounds a part refund to it. A caller's own basket has no `refundStep` (the caller knows its items).
 
 ### Payment methods
 
@@ -322,6 +348,8 @@ The database is reachable, the tables are present and the reconcile job has run 
 | `webhookUrl` | yes | The public URL monobank calls. Without it the plugin refuses to create monobank payments. |
 | `redirectUrl`, `destination`, `language` | no | Defaults for hosted pages (`language` `uk`). |
 | `checkoutValiditySeconds` | no | Default 3600. |
+| `basketItemCode`, `splitReceiverId` | no | Receipt items (A5): the item code and split receiver of every basket item. Either one switches baskets on (`splitReceiverId` alone uses the code `payment`). |
+| `basketFromInvoice` | no | `true`: a charge that pays a Kill Bill invoice gets its item from the invoice (A5, "Receipt items from the invoice"). Default `false`. Only with baskets on. |
 
 There is no global fallback token. A tenant without valid config can't make payments and reports unhealthy.
 
@@ -363,7 +391,8 @@ Counters and gauges go into Kill Bill's metrics registry (`/1.0/metrics`):
 - `unknown_open` and `pending_open` by age;
 - `notification_signature_failed`;
 - `state_conflict`, `unexpected_reversal`, `review_open`, `unknown_closed`, `hold_near_expiry`;
-- the reconcile job's last run.
+- the reconcile job's last run;
+- `basketFallback`: invoice charges sent with the default item because the invoice's item couldn't be built (A5).
 
 Alerts an operator should wire:
 - any UNKNOWN or REVIEW older than 1 hour;
@@ -415,14 +444,15 @@ Cases:
 - an unexpected reversal;
 - two Kill Bill nodes running the reconcile job at once → one charge, one settle;
 - payments in EUR or USD refused before monobank is called, and a capture or refund in the wrong currency refused;
-- a tenant without config.
+- a tenant without config;
+- receipt items from the invoice (A5): an auto-pay renewal and a hosted invoice payment carry the invoice's item (plan's pretty name, 1 × the amount) at the fake; an invoice partly paid by credit carries the balance; an external charge is named by its description; several charge lines give one item with the names joined; an amount in kopecks, an unreadable invoice and a payment without an invoice fall back to the default item and count `basketFallback`; the caller's `basketOrder` wins; the setting off changes nothing; a full and a part refund (quantity = amount ÷ sum), an amount off the step refused before monobank, `refundStep` in plugin info.
 
 **Live tests against monobank's test mode.** monobank gives a test token, so the whole plugin is also tested against the real API, and production only changes the token.
 - **One code path.** Test and production differ only in configuration: the token and, where needed, the base URL. There are no test-only branches, flags or mocks inside the plugin.
 - **The token is configuration only.** It is never in the repo. It lives in a GitHub environment secret (`monobank-test`, with required reviewers) and, for the owner's use, in the password manager or Vault.
 - **Where they run:** a separate workflow, `live.yml`, started by hand (`workflow_dispatch`) and before each release. It is never triggered by `pull_request`, so fork PRs can't reach the secret. It runs the same Testcontainers Kill Bill with the plugin pointed at monobank's test API.
 - **Webhooks in the live job:** monobank must reach the plugin. The job opens a short-lived tunnel to the test container's notification route (for example a Cloudflare quick tunnel) and sets it as `webhookUrl`. Without a tunnel, the job proves the polling path (`getPaymentInfo`, reconcile) and skips the webhook cases.
-- **What the live job covers:** a hosted payment with card saving (the payment page is completed by a headless browser with monobank's test card), a saved-card charge, a partial and a full refund, a hosted page cancelled, a statement lookup, and webhook signature verification with monobank's real key.
+- **What the live job covers:** a hosted payment with card saving (the payment page is completed by a headless browser with monobank's test card), a saved-card charge, a partial and a full refund, a charge with an item from the invoice and its part refund with a 3-decimal quantity, a hosted page cancelled, a statement lookup, and webhook signature verification with monobank's real key.
 - It is not documented whether tokenisation works with the test token (to ask monobank support). monobank also has to switch tokenisation on for the merchant.
 
 ## A13. Repository and releases (public)
