@@ -90,6 +90,7 @@ class PaymentService(
     private val cipher: CardTokenCipher,
     private val metrics: PluginMetrics,
     private val now: () -> Instant,
+    private val invoices: InvoiceReader,
 ) {
     // ---- charges --------------------------------------------------------------------------------------------
 
@@ -179,14 +180,23 @@ class PaymentService(
             )
         }
         val money = money(op) ?: return ChargeRefusal(refused(op, INVALID_AMOUNT, "invalid amount or currency"))
-        val destination = op.properties.string(Properties.DESTINATION) ?: settings.destination ?: DEFAULT_DESTINATION
         val callerBasket = op.properties.string(Properties.BASKET_ORDER)
-        val basket =
+        val callerBasketItems =
             try {
-                Baskets.fromProperty(callerBasket, money.minor) ?: Baskets.single(settings, destination, money.minor)
+                Baskets.fromProperty(callerBasket, money.minor)
             } catch (e: IllegalArgumentException) {
                 return ChargeRefusal(refused(op, INVALID_BASKET, e.message ?: "invalid basketOrder"))
             }
+        val invoiceItem = if (callerBasketItems == null) invoiceItem(op, settings, money) else null
+        val destination =
+            op.properties.string(Properties.DESTINATION)
+                ?: invoiceItem?.name
+                ?: settings.destination
+                ?: DEFAULT_DESTINATION
+        val basket =
+            callerBasketItems
+                ?: invoiceItem?.let { listOf(it) }
+                ?: Baskets.single(settings, destination, money.minor)
         val validity = op.properties.long(Properties.VALIDITY_SECONDS)
         if (op.properties.string(Properties.VALIDITY_SECONDS) != null &&
             (validity == null || validity !in VALIDITY_RANGE)
@@ -200,7 +210,53 @@ class PaymentService(
                 refused(op, NO_ACTIVE_CARD, "the payment method has no saved card; use hosted=true", decline = true),
             )
         }
-        return ChargePlan(settings, money, destination, basket, callerBasket == null, hosted, card)
+        return ChargePlan(
+            settings,
+            money,
+            destination,
+            basket,
+            callerBasket == null && invoiceItem == null,
+            hosted,
+            card,
+        )
+    }
+
+    /**
+     * The receipt item from the Kill Bill invoice this charge pays (design A5), when the tenant asks for one and the
+     * payment pays an invoice; null for the default item. Never refuses the charge: anything that can't be built is
+     * logged, counted, and the default item is sent.
+     */
+    private fun invoiceItem(
+        op: Operation,
+        settings: TenantSettings,
+        money: Money,
+    ): BasketItem? {
+        if (!settings.basketFromInvoice) return null
+        val invoiceId = op.properties.uuid(Properties.KB_INVOICE_ID) ?: return null
+        val built =
+            try {
+                Baskets.fromInvoice(invoices.read(op.tenantId, op.accountId, invoiceId), settings, op.accountId, money)
+            } catch (
+                @Suppress("TooGenericExceptionCaught") e: Exception,
+            ) {
+                InvoiceBasket.Fallback("the invoice can't be read (${e.javaClass.simpleName})")
+            }
+        return when (built) {
+            is InvoiceBasket.Built -> {
+                built.item
+            }
+
+            is InvoiceBasket.Fallback -> {
+                metrics.basketFallback.incrementAndGet()
+                LOG.warn(
+                    "Payment {} pays invoice {} with the default receipt item: {}",
+                    op.paymentId,
+                    invoiceId,
+                    built.reason,
+                )
+                null
+            }
+        }
     }
 
     private fun createHosted(

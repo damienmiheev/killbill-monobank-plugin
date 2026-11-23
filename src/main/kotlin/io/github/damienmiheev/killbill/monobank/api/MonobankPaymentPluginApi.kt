@@ -5,6 +5,7 @@
 package io.github.damienmiheev.killbill.monobank.api
 
 import io.github.damienmiheev.killbill.monobank.core.Answer
+import io.github.damienmiheev.killbill.monobank.core.Baskets
 import io.github.damienmiheev.killbill.monobank.core.CardService
 import io.github.damienmiheev.killbill.monobank.core.Operation
 import io.github.damienmiheev.killbill.monobank.core.PaymentService
@@ -489,4 +490,11 @@ internal fun transactionProperties(row: TxRow): List<PluginProperty> =
         row.callerRef?.let { PluginProperty(Properties.CALLER_REF, it, false) },
         PluginProperty(Properties.REFERENCE, row.reference.toString(), false),
         PluginProperty(Properties.STATE, row.state.name, false),
+        row
+            .takeIf { it.type in STEPPED }
+            ?.let { Baskets.amountStep(it.basket) }
+            ?.let { PluginProperty(Properties.AMOUNT_STEP, it.toString(), false) },
     )
+
+/** The rows a part capture or refund acts on: a hold, a purchase, a capture. */
+private val STEPPED = setOf(TransactionType.AUTHORIZE, TransactionType.PURCHASE, TransactionType.CAPTURE)

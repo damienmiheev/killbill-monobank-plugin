@@ -77,6 +77,10 @@ abstract class ServiceHarness {
     protected var settleHook: (TxRow) -> Unit = {}
     protected val reviewed = java.util.concurrent.ConcurrentHashMap<Long, TxState>()
 
+    /** Kill Bill's invoices, as a test sets them up (the plugin reads them for receipt items). */
+    @Volatile
+    protected var invoiceReader: (UUID, UUID, UUID) -> InvoiceView = { _, _, id -> error("no invoice $id") }
+
     @BeforeAll
     fun start() {
         val image = DockerImageName.parse(System.getProperty("killbill.db.image")).asCompatibleSubstituteFor("postgres")
@@ -124,7 +128,18 @@ abstract class ServiceHarness {
         val cipher = CardTokenCipher(settings.cardKeys, settings.currentCardKeyId, settings.tokenHmacKey)
         val clients = MonobankClients(settings)
         metrics = PluginMetrics()
-        payments = PaymentService(transactions, paymentMethods, clients, tenants, cipher, metrics, now)
+        payments =
+            PaymentService(
+                transactions,
+                paymentMethods,
+                clients,
+                tenants,
+                cipher,
+                metrics,
+                now,
+            ) { tenant, account, id ->
+                invoiceReader(tenant, account, id)
+            }
         val cards = CardService(paymentMethods, clients, tenants, cipher)
         val settler =
             object : TransactionSettler {
@@ -184,13 +199,16 @@ abstract class ServiceHarness {
         ) { null }
     }
 
+    /** More tenant settings, for a test class that needs them. */
+    protected open val extraTenantConfig: String = ""
+
     protected fun tenants(): TenantSettingsProvider {
         val config =
             """
             org.killbill.billing.plugin.monobank.merchantToken=env:it
             org.killbill.billing.plugin.monobank.webhookUrl=http://127.0.0.1:${receiver.address.port}/hook
             org.killbill.billing.plugin.monobank.splitReceiverId=${SplitReceiver.DEFAULT.id}
-            """.trimIndent()
+            """.trimIndent() + "\n" + extraTenantConfig
         return TenantSettingsProvider(
             readRaw = { config },
             boundAlias = { "it" },

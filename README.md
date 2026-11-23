@@ -103,6 +103,7 @@ org.killbill.billing.plugin.monobank.webhookUrl=https://example.com/webhooks/mon
 | `checkoutValiditySeconds` | no | Lifetime of a hosted page. Default 3600. |
 | `basketItemCode` | no | When set, every payment carries a one-item basket (`merchantPaymInfo.basketOrder`) with this product code, unless the caller passes its own. Merchants with fiscal receipts or split payments need a basket. |
 | `splitReceiverId` | no | The split receiver every basket item goes to (merchants with split payments). Implies a basket. |
+| `basketFromInvoice` | no | `true`: a payment of a Kill Bill invoice (auto-pay, Kill Bill's retries, `POST /invoices/{id}/payments`) without the caller's `basketOrder` gets one item named after what the invoice charges (the plan's catalogue `prettyName`, or an external charge's description), 1 × the amount. Default `false`; ignored without a basket. Set Ukrainian `prettyName`s on your plans first. See the design, A5. |
 
 There is no global fallback: a tenant without valid settings cannot make payments and reports unhealthy.
 
@@ -116,11 +117,13 @@ Plugin properties (`pluginProperty=key=value` on Kill Bill's payment calls):
 | `saveCard=true` | With `hosted=true`: save the card on the payment method (the customer must agree). |
 | `redirectUrl`, `destination`, `validitySeconds` | Overrides for one hosted payment. |
 | `callerRef` | Your own id for the payment (e.g. a checkout id); stored and returned as a property. |
-| `basketOrder` | A JSON array of `{name, qty, sum, code}` (plus `splitReceiverId`, `unit`, `tax`, `uktzed`) adding up to the amount. |
+| `basketOrder` | A JSON array of `{name, qty, sum, code}` (plus `splitReceiverId`, `unit`, `tax`, `uktzed`) adding up to the amount. On a capture or refund: the charge's own items with smaller quantities. Without it, a part capture or refund of a one-item charge sends that item with quantity = amount ÷ its price; the amount must be a multiple of the transaction's `amountStep`. |
 | `initiationKind=client` | A saved-card charge made with the customer present (default `merchant`). |
 
 Transactions return `formUrl`, `tdsUrl` (3-D Secure), `invoiceId`, `expiresAt`, `callerRef`, `reference` and `state` as
-plugin properties. `state` is the plugin's own state of the transaction: `SENDING`, `PENDING`, `UNKNOWN`, `REVIEW`,
+plugin properties, and `amountStep` (minor units) on a hold, purchase or capture with a one-item basket: a part capture
+or refund of it must be a multiple of it (1 for the plugin's default item; `price ÷ gcd(price, 1000)` otherwise, since
+monobank changes only an item's quantity and the plugin sends at most 3 decimals). `state` is the plugin's own state of the transaction: `SENDING`, `PENDING`, `UNKNOWN`, `REVIEW`,
 `SUCCESS`, `FAILED` or `CANCELED` (see the design, A4), in plugin info and in the answers to payment calls. It can
 differ from Kill Bill's transaction status after an operator fixes that status by hand: a FAILED transaction fixed to
 SUCCESS still says `FAILED` (the plugin refuses to refund it, since nothing was charged), and a REVIEW one keeps saying

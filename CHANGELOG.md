@@ -5,6 +5,24 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Tenant setting `basketFromInvoice=true`: a payment of a Kill Bill invoice without the caller's `basketOrder` (auto-pay,
+  Kill Bill's retries, `POST /invoices/{id}/payments`) carries one receipt item named after what the invoice charges
+  (the plan's catalogue `prettyName`, else its name; an external charge's description), quantity 1, priced at the
+  amount, with the tenant's item code and split receiver; it is also the page text unless `destination` is passed.
+  When the invoice can't be read or used (another account's, another currency, no charge line), the default item is
+  sent, a warning is logged and the health counter `basketFallback` grows. Off by default.
+- The property `amountStep` on a hold, purchase or capture with a one-item basket (minor units).
+
+### Changed
+
+- A part capture or refund of a charge with one item of its own (an invoice item or a caller's single item) no longer
+  needs the caller's `basketOrder`: the plugin sends that item with quantity = amount ÷ its price (at most 3 decimals;
+  other amounts are refused before monobank is called, `INVALID_BASKET`). The default item and several-item baskets
+  work as before.
+- Item names are cut to 128 code points everywhere (was UTF-16 characters).
+
 ## [0.1.4] - 2026-11-21
 
 ### Added

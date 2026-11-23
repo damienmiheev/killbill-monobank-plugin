@@ -65,6 +65,8 @@ class MonobankLiveIT {
                     "org.killbill.billing.plugin.monobank.destination=Kill Bill plugin live test",
                     // monobank refuses a saved-card refund without receipt items, so the tenant always sends a basket
                     "org.killbill.billing.plugin.monobank.basketItemCode=live-test",
+                    // a payment of a Kill Bill invoice gets the invoice's item (only test 22 pays invoices)
+                    "org.killbill.billing.plugin.monobank.basketFromInvoice=true",
                     receiver?.let { "org.killbill.billing.plugin.monobank.splitReceiverId=$it" },
                 ).joinToString("\n"),
             )
@@ -360,6 +362,60 @@ class MonobankLiveIT {
         val invoiceId = stack.payment(tenant, id, withPluginInfo = true).prop("invoiceId")!!
         val status = mono.invoices.status(invoiceId)
         report("at monobank", "status=${status.status} finalAmount=${status.finalAmount}")
+        assertThat(status.finalAmount).isEqualTo(0L)
+    }
+
+    /**
+     * A Kill Bill invoice (an external charge) paid with the saved card carries the invoice's item, 1 × 10.00, and is
+     * refunded in parts the plugin builds itself: quantities 0.001, 0.25 and 0.749 of that item (no caller basket).
+     * `-Dit.test=MonobankLiveIT#invoice*`.
+     */
+    @Test
+    @Order(22)
+    fun `invoice item charged by the saved card and refunded in parts of three decimals`() {
+        val mode = System.getenv("MONOBANK_LIVE_PAY")
+        assumeTrue(mode == "1" || mode == "auto", "MONOBANK_LIVE_PAY is not 1 or auto")
+        val account = stack.createAccount(tenant)
+        val pm = stack.addPaymentMethod(tenant, account)
+        val saving = paymentId(stack.pay(tenant, account, pm, "PURCHASE", "1.00", properties = HOSTED_SAVING))
+        val pageUrl = stack.payment(tenant, saving, withPluginInfo = true).prop("formUrl")!!
+        if (mode == "auto") {
+            val card = checkNotNull(LivePayer.TestCard.fromEnv(System.getenv("MONOBANK_TEST_CARD")))
+            LivePayer(card).use { it.pay(pageUrl, "saving") { settledInKillBill(saving) } }
+        } else {
+            println("LIVE-PAY (purchase 1.00 UAH, saves the card): $pageUrl")
+        }
+        awaitPaid(saving, "the saving page")
+        assertThat(awaitCardSettled(pm)).isEqualTo("ACTIVE")
+
+        val json = com.fasterxml.jackson.databind.ObjectMapper()
+        val charge =
+            json.writeValueAsString(
+                listOf(
+                    mapOf(
+                        "accountId" to account,
+                        "amount" to "10.00",
+                        "currency" to "UAH",
+                        "description" to "Live test audit, 1 домен",
+                    ),
+                ),
+            )
+        val created = stack.post("/1.0/kb/invoices/charges/$account?autoCommit=true", charge, "application/json", tenant)
+        assertThat(created.status).describedAs(created.body).isIn(200, 201)
+        val kbInvoice = created.json().path(0).path("invoiceId").asText()
+        val body = json.writeValueAsString(mapOf("accountId" to account, "purchasedAmount" to "10.00", "paymentMethodId" to pm))
+        val paid = stack.post("/1.0/kb/invoices/$kbInvoice/payments", body, "application/json", tenant)
+        assertThat(paid.status).describedAs(paid.body).isIn(201, 402)
+        val id = stack.get("/1.0/kb/invoices/$kbInvoice/payments", tenant).json().path(0).path("paymentId").asText()
+        assertThat(completeSavedCard(stack.payment(tenant, id), "invoice charge 10.00")).isEqualTo("SUCCESS")
+        assertThat(stack.payment(tenant, id, withPluginInfo = true).prop("amountStep")).isEqualTo("1")
+        for ((part, total) in listOf("0.01" to "0.01", "2.50" to "2.51", "7.49" to "10.00")) {
+            stack.followUp(tenant, id, "REFUND", part)
+            assertThat(awaitAmount(id, "refundedAmount", total)).isEqualByComparingTo(total)
+            report("invoice item refund $part", stack.payment(tenant, id, withPluginInfo = true).lastTx().path("status").asText())
+        }
+        val status = mono.invoices.status(stack.payment(tenant, id, withPluginInfo = true).prop("invoiceId")!!)
+        report("invoice item at monobank", "status=${status.status} finalAmount=${status.finalAmount}")
         assertThat(status.finalAmount).isEqualTo(0L)
     }
 

@@ -17,6 +17,9 @@ class PluginMetrics {
     val signatureFailed = AtomicLong()
     val holdsNearExpiry = AtomicLong()
     val operationStale = AtomicLong()
+
+    /** Invoice charges sent with the default basket item because the invoice's item couldn't be built. */
+    val basketFallback = AtomicLong()
     val lastReconcileRun = AtomicReference<Instant?>(null)
     val lastWebhookVerified = AtomicReference<Instant?>(null)
     val lastMonobankCall = AtomicReference<Instant?>(null)
@@ -30,6 +33,7 @@ class PluginMetrics {
             "signatureFailed" to signatureFailed.get(),
             "holdsNearExpiry" to holdsNearExpiry.get(),
             "operationStale" to operationStale.get(),
+            "basketFallback" to basketFallback.get(),
         ).apply {
             lastReconcileRun.get()?.let { put("lastReconcileRun", it.toString()) }
             lastWebhookVerified.get()?.let { put("lastWebhookVerified", it.toString()) }
