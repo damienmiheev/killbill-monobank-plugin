@@ -99,14 +99,70 @@ class BasketsTest {
     }
 
     @Test
-    fun `a caller's own item priced at one unit is not mistaken for the default one`() {
+    fun `a caller's single item gives back a fraction of itself, never more than it had`() {
         val coffee =
             Baskets.toJson(
                 Baskets.fromProperty("""[{"name":"Coffee","qty":3,"sum":100,"code":"coffee"}]""", 300),
                 isDefault = false,
             )
-        assertThatThrownBy { Baskets.forOperation(null, coffee, 150) }.hasMessageContaining("needs a basketOrder")
+        assertThat(Baskets.forOperation(null, coffee, 150)!!.single().qty).isEqualByComparingTo("1.5")
         assertThat(Baskets.forOperation(null, coffee, 300)!!.single().qty).isEqualByComparingTo("3")
+        assertThatThrownBy { Baskets.forOperation(null, coffee, 301) }.hasMessageContaining("more than the payment had")
+    }
+
+    @Test
+    fun `a one-item charge at its price gives back amount over price, in steps of three decimals`() {
+        val plan =
+            Baskets.toJson(
+                Baskets.fromProperty("""[{"name":"Plan","qty":1,"sum":229000,"code":"p","splitReceiverId":"r"}]""", 229000),
+                isDefault = false,
+            )
+        val tenth = Baskets.forOperation(null, plan, 22900)!!.single()
+        assertThat(tenth.qty).isEqualByComparingTo("0.1")
+        assertThat(tenth.sum).isEqualTo(229000)
+        assertThat(tenth.splitReceiverId).isEqualTo("r")
+        assertThat(Baskets.forOperation(null, plan, 229)!!.single().qty).isEqualByComparingTo("0.001")
+        assertThat(Baskets.forOperation(null, plan, 229000)!!.single().qty).isEqualByComparingTo("1")
+        assertThatThrownBy { Baskets.forOperation(null, plan, 228) }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessageContaining("multiple of 229")
+        assertThatThrownBy { Baskets.forOperation(null, plan, 229229) }.hasMessageContaining("more than the payment had")
+    }
+
+    @Test
+    fun `the amount step of a stored basket`() {
+        fun one(sum: Long) =
+            Baskets.toJson(
+                Baskets.fromProperty("""[{"name":"P","qty":1,"sum":$sum,"code":"p"}]""", sum),
+                isDefault = false,
+            )
+        val default =
+            Baskets.toJson(
+                Baskets.single(settings("org.killbill.billing.plugin.monobank.basketItemCode=x"), "P", 208345),
+                isDefault = true,
+            )
+        assertThat(Baskets.amountStep(default)).isEqualTo(1)
+        assertThat(Baskets.amountStep(one(229000))).isEqualTo(229)
+        assertThat(Baskets.amountStep(one(10000))).isEqualTo(10)
+        assertThat(Baskets.amountStep(one(208345))).isEqualTo(41669)
+        val two =
+            Baskets.toJson(
+                Baskets.fromProperty("""[{"name":"A","qty":1,"sum":100,"code":"a"},{"name":"B","qty":1,"sum":100,"code":"b"}]""", 200),
+                isDefault = false,
+            )
+        assertThat(Baskets.amountStep(two)).isNull()
+        assertThat(Baskets.amountStep(null)).isNull()
+        assertThat(Baskets.amountStep("not json")).isNull()
+    }
+
+    @Test
+    fun `a row stored by 0_1_4 is captured and refunded in part`() {
+        // the exact JSON 0.1.4 wrote: the default item, and seqra-be's own item
+        val defaultRow = """{"default":true,"items":[{"name":"Payment","qty":2290.00,"sum":100,"code":"payment","splitReceiverId":"r"}]}"""
+        val ownRow = """{"default":false,"items":[{"name":"Seqra Monitoring, 1 місяць","qty":1,"sum":229000,"code":"c","splitReceiverId":"r"}]}"""
+        assertThat(Baskets.forOperation(null, defaultRow, 150)!!.single().qty).isEqualByComparingTo("1.50")
+        assertThat(Baskets.forOperation(null, ownRow, 114500)!!.single().qty).isEqualByComparingTo("0.5")
+        assertThat(Baskets.amountStep(ownRow)).isEqualTo(229)
     }
 
     @Test
