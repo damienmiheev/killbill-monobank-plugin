@@ -9,6 +9,7 @@ import io.github.damienmiheev.killbill.monobank.config.ConfigUnavailableExceptio
 import io.github.damienmiheev.killbill.monobank.config.SystemSettings
 import io.github.damienmiheev.killbill.monobank.config.TenantSettingsProvider
 import io.github.damienmiheev.killbill.monobank.core.CardService
+import io.github.damienmiheev.killbill.monobank.core.KillBillInvoiceReader
 import io.github.damienmiheev.killbill.monobank.core.KillBillSettler
 import io.github.damienmiheev.killbill.monobank.core.NotificationHandler
 import io.github.damienmiheev.killbill.monobank.core.PaymentService
@@ -75,7 +76,8 @@ class MonobankActivator : KillbillActivatorBase() {
         val cipher = CardTokenCipher(settings.cardKeys, settings.currentCardKeyId, settings.tokenHmacKey)
         val clients = MonobankClients(settings)
         val metrics = PluginMetrics()
-        val payments = PaymentService(transactions, paymentMethods, clients, tenants, cipher, metrics, now)
+        val invoices = KillBillInvoiceReader(killbillAPI) { clock.clock.utcNow }
+        val payments = PaymentService(transactions, paymentMethods, clients, tenants, cipher, metrics, now, invoices)
         val cards = CardService(paymentMethods, clients, tenants, cipher)
         val settler = KillBillSettler(killbillAPI, settings, transactions, metrics) { clock.clock.utcNow }
         val healthcheck =

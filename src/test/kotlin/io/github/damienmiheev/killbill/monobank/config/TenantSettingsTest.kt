@@ -283,4 +283,17 @@ class TenantSettingsTest {
 
             override fun getUserToken(): UUID? = null
         }
+
+    @Test
+    fun `invoice items are off by default, on only with baskets, and never make the settings invalid`() {
+        val base = arrayOf("${prefix}merchantToken=t", "${prefix}webhookUrl=https://example.com/h")
+        assertThat(valid(*base, "${prefix}basketItemCode=c").basketFromInvoice).isFalse()
+        assertThat(valid(*base, "${prefix}basketItemCode=c", "${prefix}basketFromInvoice=true").basketFromInvoice)
+            .isTrue()
+        assertThat(valid(*base, "${prefix}splitReceiverId=r", "${prefix}basketFromInvoice=TRUE").basketFromInvoice)
+            .isTrue()
+        assertThat(valid(*base, "${prefix}basketFromInvoice=true").basketFromInvoice).isFalse()
+        assertThat(valid(*base, "${prefix}basketItemCode=c", "${prefix}basketFromInvoice=yes").basketFromInvoice)
+            .isFalse()
+    }
 }

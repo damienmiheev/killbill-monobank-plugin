@@ -27,6 +27,11 @@ class TenantSettings private constructor(
     val basketItemCode: String?,
     /** The split receiver every basket item goes to (merchants with split payments). */
     val splitReceiverId: String?,
+    /**
+     * A charge that pays a Kill Bill invoice gets its basket item from the invoice (design A5, "Receipt items from the
+     * invoice"). Only with a basket; `basketFromInvoice=true` without one is ignored.
+     */
+    val basketFromInvoice: Boolean = false,
 ) {
     override fun toString(): String =
         "TenantSettings(webhookUrl=$webhookUrl, redirectUrl=$redirectUrl, language=$language, " +
@@ -78,6 +83,7 @@ class TenantSettings private constructor(
             val validity = validity(get("checkoutValiditySeconds"), errors)
 
             if (errors.isNotEmpty() || token == null || webhookUrl == null) return ParseResult.Invalid(errors)
+            val itemCode = get("basketItemCode") ?: get("splitReceiverId")?.let { DEFAULT_ITEM_CODE }
             return ParseResult.Valid(
                 TenantSettings(
                     merchantToken = token,
@@ -86,8 +92,9 @@ class TenantSettings private constructor(
                     destination = get("destination"),
                     language = language,
                     checkoutValiditySeconds = validity,
-                    basketItemCode = get("basketItemCode") ?: get("splitReceiverId")?.let { DEFAULT_ITEM_CODE },
+                    basketItemCode = itemCode,
                     splitReceiverId = get("splitReceiverId"),
+                    basketFromInvoice = itemCode != null && get("basketFromInvoice").equals("true", ignoreCase = true),
                 ),
             )
         }

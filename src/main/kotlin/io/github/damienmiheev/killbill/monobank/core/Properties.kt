@@ -44,6 +44,9 @@ class Properties(
         const val EXPIRES_AT = "expiresAt"
         const val REFERENCE = "reference"
 
+        /** A part capture's or refund's amount step of a one-item basket (minor units; design A5). */
+        const val AMOUNT_STEP = "amountStep"
+
         /** The plugin's own state of the transaction ([io.github.damienmiheev.killbill.monobank.db.TxState] name). */
         const val STATE = "state"
     }

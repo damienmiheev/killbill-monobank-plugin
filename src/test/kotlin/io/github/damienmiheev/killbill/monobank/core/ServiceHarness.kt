@@ -77,6 +77,11 @@ abstract class ServiceHarness {
     protected var settleHook: (TxRow) -> Unit = {}
     protected val reviewed = java.util.concurrent.ConcurrentHashMap<Long, TxState>()
 
+    /** Kill Bill's invoices, as a test sets them up (the plugin reads them for receipt items). */
+    @Volatile
+    protected var invoiceReader: (UUID, UUID, UUID) -> InvoiceView = { _, _, id -> error("no invoice $id") }
+    private val invoices = InvoiceReader { tenant, account, id -> invoiceReader(tenant, account, id) }
+
     @BeforeAll
     fun start() {
         val image = DockerImageName.parse(System.getProperty("killbill.db.image")).asCompatibleSubstituteFor("postgres")
@@ -91,28 +96,8 @@ abstract class ServiceHarness {
         ds.connection.use { c ->
             c.createStatement().use { it.execute(Files.readString(Path.of(System.getProperty("plugin.ddl")))) }
         }
-        fake =
-            FakeMonobankAcquiring
-                .builder()
-                // like monobank's test merchant: receipts and split payments on
-                .fiscalization(true)
-                .splitPayments(true)
-                // a partial capture settles only when a test says so (monobank took more than 30 s live)
-                .finalizeSettlementDelay(null)
-                .build()
-                .start()
-        receiver = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-        receiver.createContext("/hook") { exchange ->
-            val result =
-                handler.handle(
-                    exchange.requestBody.readAllBytes(),
-                    exchange.requestHeaders.getFirst("X-Sign"),
-                    null,
-                )
-            exchange.sendResponseHeaders(result.httpStatus, -1)
-            exchange.close()
-        }
-        receiver.start()
+        fake = newFake()
+        receiver = newReceiver()
 
         val settings = systemSettings()
         val tenants = tenants()
@@ -124,7 +109,18 @@ abstract class ServiceHarness {
         val cipher = CardTokenCipher(settings.cardKeys, settings.currentCardKeyId, settings.tokenHmacKey)
         val clients = MonobankClients(settings)
         metrics = PluginMetrics()
-        payments = PaymentService(transactions, paymentMethods, clients, tenants, cipher, metrics, now)
+        payments =
+            PaymentService(
+                transactions,
+                paymentMethods,
+                clients,
+                tenants,
+                cipher,
+                metrics,
+                now,
+            ) { tenant, account, id ->
+                invoiceReader(tenant, account, id)
+            }
         val cards = CardService(paymentMethods, clients, tenants, cipher)
         val settler =
             object : TransactionSettler {
@@ -168,6 +164,33 @@ abstract class ServiceHarness {
         }
     }
 
+    private fun newFake(): FakeMonobankAcquiring =
+        FakeMonobankAcquiring
+            .builder()
+            // like monobank's test merchant: receipts and split payments on
+            .fiscalization(true)
+            .splitPayments(true)
+            // a partial capture settles only when a test says so (monobank took more than 30 s live)
+            .finalizeSettlementDelay(null)
+            .build()
+            .start()
+
+    private fun newReceiver(): HttpServer {
+        val receiver = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        receiver.createContext("/hook") { exchange ->
+            val result =
+                handler.handle(
+                    exchange.requestBody.readAllBytes(),
+                    exchange.requestHeaders.getFirst("X-Sign"),
+                    null,
+                )
+            exchange.sendResponseHeaders(result.httpStatus, -1)
+            exchange.close()
+        }
+        receiver.start()
+        return receiver
+    }
+
     protected fun systemSettings(): SystemSettings {
         val key = Base64.getEncoder().encodeToString(ByteArray(32) { 3 })
         val p = SystemSettings.PREFIX
@@ -184,13 +207,16 @@ abstract class ServiceHarness {
         ) { null }
     }
 
+    /** More tenant settings, for a test class that needs them. */
+    protected open val extraTenantConfig: String = ""
+
     protected fun tenants(): TenantSettingsProvider {
         val config =
             """
             org.killbill.billing.plugin.monobank.merchantToken=env:it
             org.killbill.billing.plugin.monobank.webhookUrl=http://127.0.0.1:${receiver.address.port}/hook
             org.killbill.billing.plugin.monobank.splitReceiverId=${SplitReceiver.DEFAULT.id}
-            """.trimIndent()
+            """.trimIndent() + "\n" + extraTenantConfig
         return TenantSettingsProvider(
             readRaw = { config },
             boundAlias = { "it" },
