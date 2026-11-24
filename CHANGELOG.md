@@ -5,12 +5,15 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-11-23
+
 ### Added
 
 - Tenant setting `basketFromInvoice=true`: a payment of a Kill Bill invoice without the caller's `basketOrder` (auto-pay,
   Kill Bill's retries, `POST /invoices/{id}/payments`) carries one receipt item named after what the invoice charges
   (the plan's catalogue `prettyName`, else its name; an external charge's description), quantity 1, priced at the
-  amount, with the tenant's item code and split receiver; it is also the page text unless `destination` is passed.
+  amount, with the tenant's item code and split receiver. Its name is also the page text, ahead of the tenant's
+  `destination` setting; a `destination` property on the payment still comes first.
   When the invoice can't be read or used (another account's, another currency, no charge line), the default item is
   sent, a warning is logged and the health counter `basketFallback` grows. Off by default.
 - A part capture or refund of a charge with the invoice's item needs no `basketOrder`: the plugin sends that item with
@@ -76,7 +79,8 @@ failed at signing and at the Central Portal's validation.)
   the payment control plugins so invoices are paid, the cancel and public-key routes, and a reconcile job.
 - Encrypted card tokens bound to their payment method, removal at monobank on delete.
 
-[Unreleased]: https://github.com/damienmiheev/killbill-monobank-plugin/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/damienmiheev/killbill-monobank-plugin/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/damienmiheev/killbill-monobank-plugin/releases/tag/v0.1.5
 [0.1.4]: https://github.com/damienmiheev/killbill-monobank-plugin/releases/tag/v0.1.4
 [0.1.3]: https://github.com/damienmiheev/killbill-monobank-plugin/releases/tag/v0.1.3
 [0.1.2]: https://github.com/damienmiheev/killbill-monobank-plugin/releases/tag/v0.1.2
