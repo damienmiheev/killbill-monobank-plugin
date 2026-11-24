@@ -5,6 +5,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-11-24
+
 The first release with receipt items from the invoice. (0.1.5 was tagged but never published: the publish
 workflow's own check stopped on a race in a new integration test, fixed here; the plugin code is unchanged.)
 
@@ -80,7 +82,8 @@ failed at signing and at the Central Portal's validation.)
   the payment control plugins so invoices are paid, the cancel and public-key routes, and a reconcile job.
 - Encrypted card tokens bound to their payment method, removal at monobank on delete.
 
-[Unreleased]: https://github.com/damienmiheev/killbill-monobank-plugin/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/damienmiheev/killbill-monobank-plugin/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/damienmiheev/killbill-monobank-plugin/releases/tag/v0.1.6
 [0.1.4]: https://github.com/damienmiheev/killbill-monobank-plugin/releases/tag/v0.1.4
 [0.1.3]: https://github.com/damienmiheev/killbill-monobank-plugin/releases/tag/v0.1.3
 [0.1.2]: https://github.com/damienmiheev/killbill-monobank-plugin/releases/tag/v0.1.2
