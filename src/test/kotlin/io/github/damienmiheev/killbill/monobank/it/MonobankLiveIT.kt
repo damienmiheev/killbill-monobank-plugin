@@ -412,16 +412,29 @@ class MonobankLiveIT {
                 .path(0)
                 .path("invoiceId")
                 .asText()
-        // the saved card is the account's default method, so Kill Bill's auto-pay charges the new invoice itself
+
+        // the saved card is the account's default method, so Kill Bill's auto-pay charges the new invoice itself, in
+        // the background: wait until its payment is listed and its transaction is past UNKNOWN (the plugin answered)
+        fun ready(found: JsonNode): Boolean =
+            found
+                .path(0)
+                .path("paymentId")
+                .asText()
+                .isNotEmpty() &&
+                found
+                    .path(
+                        0,
+                    ).path("transactions")
+                    .let { it.size() > 0 && it.last().path("status").asText() != "UNKNOWN" }
         val deadline = System.nanoTime() + WAIT.toNanos()
         var payments = stack.get("/1.0/kb/invoices/$kbInvoice/payments", tenant).json()
-        while (payments.size() == 0) {
-            check(System.nanoTime() < deadline) { "Kill Bill never charged invoice $kbInvoice" }
+        while (!ready(payments)) {
+            check(System.nanoTime() < deadline) { "Kill Bill never charged invoice $kbInvoice: $payments" }
             Thread.sleep(2_000)
             payments = stack.get("/1.0/kb/invoices/$kbInvoice/payments", tenant).json()
         }
-        val id = payments.path(0).path("paymentId").asText()
-        assertThat(completeSavedCard(stack.payment(tenant, id), "invoice charge 10.00")).isEqualTo("SUCCESS")
+        val id = paymentId(payments.path(0))
+        assertThat(completeSavedCard(payments.path(0), "invoice charge 10.00")).isEqualTo("SUCCESS")
         assertThat(stack.payment(tenant, id, withPluginInfo = true).prop("amountStep")).isEqualTo("1")
         for ((part, total) in listOf("0.01" to "0.01", "2.50" to "2.51", "7.49" to "10.00")) {
             stack.followUp(tenant, id, "REFUND", part)
