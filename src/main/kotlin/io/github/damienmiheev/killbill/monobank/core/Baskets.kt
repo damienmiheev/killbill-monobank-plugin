@@ -77,7 +77,7 @@ object Baskets {
 
     /**
      * The basket as stored on a row, to rebuild the items of later captures and refunds: the items and their [Kind]
-     * (`default` and, from 0.1.5, `invoice` flags; a row of 0.1.4 has only `default`).
+     * (`default` and, from 0.1.6, `invoice` flags; a row of 0.1.4 has only `default`).
      */
     fun toJson(
         items: List<BasketItem>?,

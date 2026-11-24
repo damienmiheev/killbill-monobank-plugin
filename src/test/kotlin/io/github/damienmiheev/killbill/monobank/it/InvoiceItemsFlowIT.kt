@@ -215,7 +215,9 @@ class InvoiceItemsFlowIT {
     @Test
     fun `a hosted payment of an external charge is named by the charge's description`() {
         val account = stack.createAccount(tenant)
-        val pm = stack.addPaymentMethod(tenant, account)
+        // not the account's default method: Kill Bill's auto-pay would charge the new invoice itself (declined here,
+        // no card yet) and race the page for the invoice's first payment
+        val pm = stack.addPaymentMethod(tenant, account, isDefault = false)
         val charge =
             json.writeValueAsString(
                 listOf(

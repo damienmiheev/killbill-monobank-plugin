@@ -310,7 +310,9 @@ class PaymentFlowIT {
     fun `a hosted invoice payment marks the Kill Bill invoice paid`() {
         val tenant = stack.moneyTenant()
         val account = stack.createAccount(tenant)
-        val pm = stack.addPaymentMethod(tenant, account)
+        // not the account's default method: Kill Bill's auto-pay would charge the new invoice itself (declined, no
+        // card) and race the page for the invoice's first payment
+        val pm = stack.addPaymentMethod(tenant, account, isDefault = false)
         val charge =
             json.writeValueAsString(
                 listOf(

@@ -17,7 +17,7 @@ object ItemNames {
     private val SPACES = Regex("\\s+")
 
     /**
-     * A name cut to monobank's 128 characters: 128 UTF-16 units as before 0.1.5 (never more code points, whichever
+     * A name cut to monobank's 128 characters: 128 UTF-16 units as before 0.1.6 (never more code points, whichever
      * monobank counts), one less when that would split a surrogate pair.
      */
     fun cut(name: String): String {
