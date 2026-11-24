@@ -415,17 +415,13 @@ class MonobankLiveIT {
 
         // the saved card is the account's default method, so Kill Bill's auto-pay charges the new invoice itself, in
         // the background: wait until its payment is listed and its transaction is past UNKNOWN (the plugin answered)
-        fun ready(found: JsonNode): Boolean =
-            found
-                .path(0)
-                .path("paymentId")
-                .asText()
-                .isNotEmpty() &&
-                found
-                    .path(
-                        0,
-                    ).path("transactions")
-                    .let { it.size() > 0 && it.last().path("status").asText() != "UNKNOWN" }
+        fun ready(found: JsonNode): Boolean {
+            val first = found.path(0)
+            val txs = first.path("transactions")
+            return first.path("paymentId").asText().isNotEmpty() &&
+                txs.size() > 0 &&
+                txs.last().path("status").asText() != "UNKNOWN"
+        }
         val deadline = System.nanoTime() + WAIT.toNanos()
         var payments = stack.get("/1.0/kb/invoices/$kbInvoice/payments", tenant).json()
         while (!ready(payments)) {
