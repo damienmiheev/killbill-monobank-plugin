@@ -180,7 +180,7 @@
             <!-- Live tests only: pays monobank's test payment pages with a test card. -->
             <groupId>com.microsoft.playwright</groupId>
             <artifactId>playwright</artifactId>
-            <version>1.65.0</version>
+            <version>1.65.1</version>
             <scope>test</scope>
         </dependency>
         <dependency>
